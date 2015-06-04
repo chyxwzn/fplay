@@ -52,6 +52,7 @@
 # include "libavfilter/avfilter.h"
 # include "libavfilter/buffersink.h"
 # include "libavfilter/buffersrc.h"
+#include "libavfilter/drawutils.h"
 #endif
 
 #include <SDL.h>
@@ -60,6 +61,8 @@
 #include "cmdutils.h"
 
 #include <assert.h>
+
+#include <ass/ass.h>
 
 const char program_name[] = "ffplay";
 const int program_birth_year = 2003;
@@ -193,6 +196,21 @@ typedef struct Decoder {
     AVRational next_pts_tb;
     SDL_Thread *decoder_tid;
 } Decoder;
+
+typedef struct {
+    ASS_Library  *library;
+    ASS_Renderer *renderer;
+    ASS_Track    *track;
+    char *filename;
+    char *charenc;
+    char *force_style;
+    int stream_index;
+    uint8_t rgba_map[4];
+    int     pix_step[4];       ///< steps per pixel for each plane of the main output
+    int original_w, original_h;
+    int shaping;
+    FFDrawContext draw;
+} SubContext;
 
 typedef struct VideoState {
     SDL_Thread *read_tid;
@@ -347,11 +365,23 @@ static int is_full_screen;
 static int64_t audio_callback_time;
 
 static AVPacket flush_pkt;
+static SubContext *sc;
 
 #define FF_ALLOC_EVENT   (SDL_USEREVENT)
 #define FF_QUIT_EVENT    (SDL_USEREVENT + 2)
 
 static SDL_Surface *screen;
+/* libass supports a log level ranging from 0 to 7 */
+static const int ass_log_level_map[] = {
+    [0] = AV_LOG_FATAL,     /* MSGL_FATAL */
+    [1] = AV_LOG_ERROR,     /* MSGL_ERR */
+    [2] = AV_LOG_WARNING,   /* MSGL_WARN */
+    [3] = AV_LOG_WARNING,   /* <undefined> */
+    [4] = AV_LOG_INFO,      /* MSGL_INFO */
+    [5] = AV_LOG_INFO,      /* <undefined> */
+    [6] = AV_LOG_VERBOSE,   /* MSGL_V */
+    [7] = AV_LOG_DEBUG,     /* MSGL_DBG2 */
+};
 
 #if CONFIG_AVFILTER
 static int opt_add_vfilter(void *optctx, const char *opt, const char *arg)
@@ -1094,6 +1124,12 @@ static void calculate_display_rect(SDL_Rect *rect,
     /* av_log(NULL, AV_LOG_DEBUG, "x:%d, y:%d, w:%d, h:%d\n",rect->x,rect->y,rect->w,rect->h); */
 }
 
+/* libass stores an RGBA color in the format RRGGBBTT, where TT is the transparency level */
+#define AR(c)  ( (c)>>24)
+#define AG(c)  (((c)>>16)&0xFF)
+#define AB(c)  (((c)>>8) &0xFF)
+#define AA(c)  ((0xFF-(c)) &0xFF)
+
 static void video_image_display(VideoState *is)
 {
     Frame *vp;
@@ -1101,6 +1137,8 @@ static void video_image_display(VideoState *is)
     AVPicture pict;
     SDL_Rect rect;
     int i;
+    int detect_change = 0;
+    double time_ms = 0;
 
     vp = frame_queue_peek(&is->pictq);
     if (vp->bmp) {
@@ -1126,6 +1164,32 @@ static void video_image_display(VideoState *is)
                     SDL_UnlockYUVOverlay (vp->bmp);
                 }
             }
+            /* else { */
+            /*     time_ms = vp->pts / (double)AV_TIME_BASE * 1000; */
+            /*     ASS_Image *image = ass_render_frame(sc->renderer, sc->track, */
+            /*                                         time_ms, &detect_change); */
+            /*  */
+            /*     if (detect_change) */
+            /*         av_log(NULL, AV_LOG_DEBUG, "Change happened at time ms:%f\n", time_ms); */
+            /*  */
+            /*     for (; image; image = image->next) { */
+            /*         uint8_t rgba_color[] = {AR(image->color), AG(image->color), AB(image->color), AA(image->color)}; */
+            /*         FFDrawColor color; */
+            /*         ff_draw_color(&sc->draw, &color, rgba_color); */
+            /*         pict.data[0] = vp->bmp->pixels[0]; */
+            /*         pict.data[1] = vp->bmp->pixels[2]; */
+            /*         pict.data[2] = vp->bmp->pixels[1]; */
+            /*  */
+            /*         pict.linesize[0] = vp->bmp->pitches[0]; */
+            /*         pict.linesize[1] = vp->bmp->pitches[2]; */
+            /*         pict.linesize[2] = vp->bmp->pitches[1]; */
+            /*         ff_blend_mask(&sc->draw, &color, */
+            /*                       pict.data, pict.linesize, */
+            /*                       vp->bmp->w, vp->bmp->h, */
+            /*                       image->bitmap, image->stride, image->w, image->h, */
+            /*                       3, 0, image->dst_x, image->dst_y); */
+            /*     } */
+            /* } */
         }
 
         /* av_log(NULL, AV_LOG_DEBUG,"is->xleft:%d, is->ytop:%d, is->width:%d, is->height:%d, vp->width:%d, vp->height:%d, vp->sar:%d",is->xleft, is->ytop, is->width, is->height, vp->width, vp->height, vp->sar); */
@@ -2318,6 +2382,48 @@ static int video_thread(void *arg)
     return 0;
 }
 
+static void sub_log(int ass_level, const char *fmt, va_list args, void *ctx)
+{
+    const int ass_level_clip = av_clip(ass_level, 0,
+        FF_ARRAY_ELEMS(ass_log_level_map) - 1);
+    const int level = ass_log_level_map[ass_level_clip];
+
+    av_log(ctx, level, fmt, args);
+    av_log(ctx, level, "\n");
+}
+
+static int subtitle_init()
+{
+    sc = av_mallocz(sizeof(SubContext));
+    if(!sc)
+        return -1;
+
+    sc->library = ass_library_init();
+    if (!sc->library) {
+        av_log(NULL, AV_LOG_ERROR, "Could not initialize libass.\n");
+        return AVERROR(EINVAL);
+    }
+    av_log(NULL, AV_LOG_DEBUG, "log2\n");
+    ass_set_message_cb(sc->library, sub_log, NULL);
+    sc->renderer = ass_renderer_init(sc->library);
+    if (!sc->renderer) {
+        av_log(NULL, AV_LOG_ERROR, "Could not initialize libass renderer.\n");
+        return AVERROR(EINVAL);
+    }
+}
+
+static void subtitle_uninit()
+{
+    if (sc->track)
+        ass_free_track(sc->track);
+    if (sc->renderer)
+        ass_renderer_done(sc->renderer);
+    if (sc->library)
+        ass_library_done(sc->library);
+    av_free(sc);
+    sc = NULL;
+}
+
 static int subtitle_thread(void *arg)
 {
     VideoState *is = arg;
@@ -2327,6 +2433,7 @@ static int subtitle_thread(void *arg)
     int i, j;
     int r, g, b, y, u, v, a;
 
+    subtitle_init();
     for (;;) {
         if (!(sp = frame_queue_peek_writable(&is->subpq)))
             return 0;
@@ -2357,6 +2464,13 @@ static int subtitle_thread(void *arg)
             /* now we can update the picture count */
             frame_queue_push(&is->subpq);
         } else if (got_subtitle) {
+            for (i = 0; i < sp->sub.num_rects; i++) {
+                char *ass_line = sp->sub.rects[i]->ass;
+                if (!ass_line)
+                    break;
+                av_log(NULL, AV_LOG_DEBUG, "got subtitle: %s\n", ass_line);
+                ass_process_data(sc->track, ass_line, strlen(ass_line));
+            }
             avsubtitle_free(&sp->sub);
         }
     }
@@ -2840,6 +2954,7 @@ static void stream_component_close(VideoState *is, int stream_index)
     case AVMEDIA_TYPE_SUBTITLE:
         is->subtitle_st = NULL;
         is->subtitle_stream = -1;
+        subtitle_uninit();
         break;
     default:
         break;

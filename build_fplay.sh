@@ -1,2 +1,2 @@
 #!/bin/sh
-gcc -o fplayer ffplay.c cmdutils.c -I. -I/mingw64/include/SDL -lavformat -lavcodec -lavfilter -lavdevice -lswscale -lswresample -lavutil -lSDL -lm
+gcc -o fplay ffplay.c cmdutils.c libavfilter/drawutils.c libavfilter/formats.c -I. -I/mingw64/include/SDL -lavformat -lavcodec -lavfilter -lavdevice -lswscale -lswresample -lavutil -lSDL -lm -lass
