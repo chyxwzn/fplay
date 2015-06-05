@@ -1164,32 +1164,41 @@ static void video_image_display(VideoState *is)
                     SDL_UnlockYUVOverlay (vp->bmp);
                 }
             }
-            /* else { */
-            /*     time_ms = vp->pts / (double)AV_TIME_BASE * 1000; */
-            /*     ASS_Image *image = ass_render_frame(sc->renderer, sc->track, */
-            /*                                         time_ms, &detect_change); */
-            /*  */
-            /*     if (detect_change) */
-            /*         av_log(NULL, AV_LOG_DEBUG, "Change happened at time ms:%f\n", time_ms); */
-            /*  */
-            /*     for (; image; image = image->next) { */
-            /*         uint8_t rgba_color[] = {AR(image->color), AG(image->color), AB(image->color), AA(image->color)}; */
-            /*         FFDrawColor color; */
-            /*         ff_draw_color(&sc->draw, &color, rgba_color); */
-            /*         pict.data[0] = vp->bmp->pixels[0]; */
-            /*         pict.data[1] = vp->bmp->pixels[2]; */
-            /*         pict.data[2] = vp->bmp->pixels[1]; */
-            /*  */
-            /*         pict.linesize[0] = vp->bmp->pitches[0]; */
-            /*         pict.linesize[1] = vp->bmp->pitches[2]; */
-            /*         pict.linesize[2] = vp->bmp->pitches[1]; */
-            /*         ff_blend_mask(&sc->draw, &color, */
-            /*                       pict.data, pict.linesize, */
-            /*                       vp->bmp->w, vp->bmp->h, */
-            /*                       image->bitmap, image->stride, image->w, image->h, */
-            /*                       3, 0, image->dst_x, image->dst_y); */
-            /*     } */
-            /* } */
+            else {
+                /* if (sc->original_w && sc->original_h) */
+                /*     ass_set_aspect_ratio(sc->renderer, (double)vp->width / vp->height, */
+                /*                          (double)sc->original_w / sc->original_h); */
+                /* if (sc->shaping != -1) */
+                /*     ass_set_shaper(sc->renderer, sc->shaping); */
+                time_ms = vp->pts * 1000;
+                /* av_log(NULL, AV_LOG_DEBUG, "frame pts:%f, time_ms: %f\n", vp->pts, time_ms); */
+                ASS_Image *image = ass_render_frame(sc->renderer, sc->track,
+                                                    time_ms, &detect_change);
+
+                /* if (detect_change) */
+                /*     av_log(NULL, AV_LOG_DEBUG, "Change happened at time ms:%f\n", time_ms); */
+
+                for (; image; image = image->next) {
+                    av_log(NULL, AV_LOG_DEBUG, "image color, r:%d,g:%d,b:%d,a:%d\n", AR(image->color), AG(image->color), AB(image->color), AA(image->color));
+                    uint8_t rgba_color[] = {AR(image->color), AG(image->color), AB(image->color), AA(image->color)};
+                    FFDrawColor color;
+                    ff_draw_color(&sc->draw, &color, rgba_color);
+                    SDL_LockYUVOverlay (vp->bmp);
+                    pict.data[0] = vp->bmp->pixels[0];
+                    pict.data[1] = vp->bmp->pixels[2];
+                    pict.data[2] = vp->bmp->pixels[1];
+
+                    pict.linesize[0] = vp->bmp->pitches[0];
+                    pict.linesize[1] = vp->bmp->pitches[2];
+                    pict.linesize[2] = vp->bmp->pitches[1];
+                    ff_blend_mask(&sc->draw, &color,
+                                  pict.data, pict.linesize,
+                                  vp->bmp->w, vp->bmp->h,
+                                  image->bitmap, image->stride, image->w, image->h,
+                                  3, 0, image->dst_x, image->dst_y);
+                    SDL_UnlockYUVOverlay (vp->bmp);
+                }
+            }
         }
 
         /* av_log(NULL, AV_LOG_DEBUG,"is->xleft:%d, is->ytop:%d, is->width:%d, is->height:%d, vp->width:%d, vp->height:%d, vp->sar:%d",is->xleft, is->ytop, is->width, is->height, vp->width, vp->height, vp->sar); */
@@ -1783,17 +1792,17 @@ display:
                 av_diff = get_master_clock(is) - get_clock(&is->vidclk);
             else if (is->audio_st)
                 av_diff = get_master_clock(is) - get_clock(&is->audclk);
-            av_log(NULL, AV_LOG_INFO,
-                   "%7.2f %s:%7.3f fd=%4d aq=%5dKB vq=%5dKB sq=%5dB f=%"PRId64"/%"PRId64"   \r",
-                   get_master_clock(is),
-                   (is->audio_st && is->video_st) ? "A-V" : (is->video_st ? "M-V" : (is->audio_st ? "M-A" : "   ")),
-                   av_diff,
-                   is->frame_drops_early + is->frame_drops_late,
-                   aqsize / 1024,
-                   vqsize / 1024,
-                   sqsize,
-                   is->video_st ? is->video_st->codec->pts_correction_num_faulty_dts : 0,
-                   is->video_st ? is->video_st->codec->pts_correction_num_faulty_pts : 0);
+            /* av_log(NULL, AV_LOG_INFO, */
+            /*        "%7.2f %s:%7.3f fd=%4d aq=%5dKB vq=%5dKB sq=%5dB f=%"PRId64"/%"PRId64"   \r", */
+            /*        get_master_clock(is), */
+            /*        (is->audio_st && is->video_st) ? "A-V" : (is->video_st ? "M-V" : (is->audio_st ? "M-A" : "   ")), */
+            /*        av_diff, */
+            /*        is->frame_drops_early + is->frame_drops_late, */
+            /*        aqsize / 1024, */
+            /*        vqsize / 1024, */
+            /*        sqsize, */
+            /*        is->video_st ? is->video_st->codec->pts_correction_num_faulty_dts : 0, */
+            /*        is->video_st ? is->video_st->codec->pts_correction_num_faulty_pts : 0); */
             fflush(stdout);
             last_time = cur_time;
         }
@@ -1864,6 +1873,7 @@ static int queue_picture(VideoState *is, AVFrame *src_frame, double pts, double 
         return -1;
 
     vp->sar = src_frame->sample_aspect_ratio;
+    vp->frame->format = src_frame->format;
 
     /* alloc or resize hardware picture buffer */
     if (!vp->bmp || vp->reallocate || !vp->allocated ||
@@ -2388,8 +2398,8 @@ static void sub_log(int ass_level, const char *fmt, va_list args, void *ctx)
         FF_ARRAY_ELEMS(ass_log_level_map) - 1);
     const int level = ass_log_level_map[ass_level_clip];
 
-    av_log(ctx, level, fmt, args);
-    av_log(ctx, level, "\n");
+    av_log(NULL, level, fmt, args);
+    av_log(NULL, level, "\n");
 }
 
 static int subtitle_init()
@@ -2403,13 +2413,19 @@ static int subtitle_init()
         av_log(NULL, AV_LOG_ERROR, "Could not initialize libass.\n");
         return AVERROR(EINVAL);
     }
-    av_log(NULL, AV_LOG_DEBUG, "log2\n");
     ass_set_message_cb(sc->library, sub_log, NULL);
     sc->renderer = ass_renderer_init(sc->library);
     if (!sc->renderer) {
         av_log(NULL, AV_LOG_ERROR, "Could not initialize libass renderer.\n");
         return AVERROR(EINVAL);
     }
+    sc->track = ass_new_track(sc->library);
+    if (!sc->track) {
+        av_log(NULL, AV_LOG_ERROR, "Could not create a libass track\n");
+        return AVERROR(EINVAL);
+    }
+    /* Initialize fonts */
+    ass_set_fonts(sc->renderer, NULL, NULL, 1, NULL, 1);
 }
 
 static void subtitle_uninit()
@@ -2434,6 +2450,12 @@ static int subtitle_thread(void *arg)
     int r, g, b, y, u, v, a;
 
     subtitle_init();
+    /* Decode subtitles and push them into the renderer (libass) */
+    if (is->subdec.avctx != NULL && (is->subdec.avctx)->subtitle_header != NULL)
+        av_log(NULL, AV_LOG_DEBUG,"subtitle_header, size:%d, content:%s\nstrlen:%d\n", (is->subdec.avctx)->subtitle_header_size,(is->subdec.avctx)->subtitle_header,strlen((is->subdec.avctx)->subtitle_header));
+        /* ass_process_codec_private(sc->track,(is->subdec.avctx)->subtitle_header,(is->subdec.avctx)->subtitle_header_size); */
+    ff_draw_init(&sc->draw, 0, 0);
+    ass_set_frame_size(sc->renderer, 960, 540);
     for (;;) {
         if (!(sp = frame_queue_peek_writable(&is->subpq)))
             return 0;
@@ -2468,9 +2490,12 @@ static int subtitle_thread(void *arg)
                 char *ass_line = sp->sub.rects[i]->ass;
                 if (!ass_line)
                     break;
-                av_log(NULL, AV_LOG_DEBUG, "got subtitle: %s\n", ass_line);
+                /* av_log(NULL, AV_LOG_DEBUG, "got subtitle: %s\n", ass_line); */
                 ass_process_data(sc->track, ass_line, strlen(ass_line));
+                /* av_log(NULL, AV_LOG_DEBUG, "subtitle pts : %f\n", sp->sub.pts); */
+                /* ass_process_chunk(sc->track, ass_line, strlen(ass_line), sp->sub.pts / AV_TIME_BASE, sp->sub.end_display_time - sp->sub.start_display_time); */
             }
+            /* av_log(NULL,AV_LOG_DEBUG, "subtitle event number:%d\n", sc->track->n_events); */
             avsubtitle_free(&sp->sub);
         }
     }
