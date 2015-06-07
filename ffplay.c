@@ -198,9 +198,23 @@ typedef struct Decoder {
 } Decoder;
 
 typedef struct {
+    int64_t start_pts; //ms
+    int64_t end_pts;
+    char * ass_line;
+    char * text;
+}SubLine;
+
+typedef struct {
+    int max_lines;
+    int n_lines;
+    SubLine * lines;
+}Subtitle;
+
+typedef struct {
     ASS_Library  *library;
     ASS_Renderer *renderer;
     ASS_Track    *track;
+    Subtitle *sub;
     char *filename;
     char *charenc;
     FFDrawContext draw;
@@ -2400,6 +2414,9 @@ static int subtitle_init()
         av_log(NULL, AV_LOG_ERROR, "Could not create a libass track\n");
         return AVERROR(EINVAL);
     }
+    sc->sub = av_mallocz(sizeof(Subtitle));
+    if(!sc->sub)
+        return -1;
 }
 
 static void subtitle_uninit()
@@ -2615,13 +2632,30 @@ static int subtitle_thread(void *arg)
             for (i = 0; i < sp->sub.num_rects; i++) {
                 char *ass_line = sp->sub.rects[i]->ass;
                 int exist = 0;
+                int line_id = 0;
                 if (!ass_line)
                     break;
                 /* av_log(NULL, AV_LOG_DEBUG, "got subtitle: %s\n", ass_line); */
-                /* for(j = 0; j < sc->track->n_events;j++){ */
-                /*     if(strcmp) */
-                /* } */
-                ass_process_data(sc->track, ass_line, strlen(ass_line));
+                for(j = 0; j < sc->sub->n_lines;j++){
+                    if(strcmp((const char*)ass_line, sc->sub->lines[j].ass_line) == 0){
+                        exist = 1;
+                        break;
+                    }
+                }
+                if(!exist){
+                    if(sc->sub->n_lines == sc->sub->max_lines){
+                        sc->sub->max_lines = sc->sub->max_lines * 2 + 1;
+                        sc->sub->lines = (SubLine*)realloc(sc->sub->lines,sizeof(SubLine)*sc->sub->max_lines);
+                    }
+                    line_id = sc->sub->n_lines++;
+                    memset(sc->sub->lines+line_id,0,sizeof(SubLine));
+                    sc->sub->lines[line_id].ass_line = strdup(ass_line);
+                    ass_process_data(sc->track, ass_line, strlen(ass_line));
+                    sc->sub->lines[line_id].start_pts = (sc->track->events[sc->track->n_events-1]).Start;
+                    sc->sub->lines[line_id].end_pts = sc->track->events[sc->track->n_events-1].Start+sc->track->events[sc->track->n_events-1].Duration;
+                    sc->sub->lines[line_id].text = strdup(sc->track->events[sc->track->n_events-1].Text);
+                }
+
                 /* av_log(NULL, AV_LOG_DEBUG, "subtitle pts : %f\n", sp->sub.pts); */
             }
             /* av_log(NULL,AV_LOG_DEBUG, "subtitle event number:%d\n", sc->track->n_events); */
