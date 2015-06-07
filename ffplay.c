@@ -200,6 +200,7 @@ typedef struct Decoder {
 typedef struct {
     int64_t start_pts; //ms
     int64_t end_pts;
+    int32_t duration;
     char * ass_line;
     char * text;
 }SubLine;
@@ -215,8 +216,8 @@ typedef struct {
     ASS_Renderer *renderer;
     ASS_Track    *track;
     Subtitle *sub;
-    char *filename;
-    char *charenc;
+    const char *filename;
+    const char *charenc;
     FFDrawContext draw;
 } SubContext;
 
@@ -329,6 +330,7 @@ static AVInputFormat *file_iformat;
 static const char *input_filename;
 static const char *window_title;
 static const char *subtitle_filename;
+static const char *subtitle_char_encoding;
 static int fs_screen_width;
 static int fs_screen_height;
 static int default_width  = 640;
@@ -1222,6 +1224,7 @@ static void video_audio_display(VideoState *s)
     /* compute display index : center on currently output samples */
     channels = s->audio_tgt.channels;
     nb_display_channels = channels;
+    /* av_log(NULL,AV_LOG_DEBUG,"audio_display\n"); */
     if (!s->paused) {
         int data_used= s->show_mode == SHOW_MODE_WAVES ? s->width : (2*nb_freq);
         n = 2 * channels;
@@ -1420,7 +1423,7 @@ static int video_open(VideoState *is, int force_set_video_mode, Frame *vp)
     } else if (!is_full_screen && screen_width) {
         w = screen_width;
         h = screen_height;
-    } else if (!is_full_screen && vp->width > (int)fs_screen_width*2/3) {
+    } else if (!is_full_screen && vp && vp->width > (int)fs_screen_width*2/3) {
         w = ((int)fs_screen_width/3)*2;
         h = ((int)fs_screen_height/3)*2;
     } else {
@@ -1431,6 +1434,7 @@ static int video_open(VideoState *is, int force_set_video_mode, Frame *vp)
     if (screen && is->width == screen->w && screen->w == w
        && is->height== screen->h && screen->h == h && !force_set_video_mode)
         return 0;
+    /* av_log(NULL,AV_LOG_DEBUG,"w:%d,h:%d,dw:%d,dh:%d,sw:%d,sh:%d\n",w,h,default_width,default_height,screen_width,screen_height); */
     screen = SDL_SetVideoMode(w, h, 0, flags);
     if (!screen) {
         av_log(NULL, AV_LOG_FATAL, "SDL: could not set video mode - exiting\n");
@@ -1449,8 +1453,9 @@ static int video_open(VideoState *is, int force_set_video_mode, Frame *vp)
 /* display the current picture, if any */
 static void video_display(VideoState *is)
 {
-    if (!screen)
+    if (!screen){
         video_open(is, 0, NULL);
+    }
     if (is->audio_st && is->show_mode != SHOW_MODE_VIDEO)
         video_audio_display(is);
     else if (is->video_st)
@@ -2206,8 +2211,9 @@ static int audio_thread(void *arg)
         return AVERROR(ENOMEM);
 
     do {
-        if ((got_frame = decoder_decode_frame(&is->auddec, frame, NULL)) < 0)
+        if ((got_frame = decoder_decode_frame(&is->auddec, frame, NULL)) < 0){
             goto the_end;
+        }
 
         if (got_frame) {
                 tb = (AVRational){1, frame->sample_rate};
@@ -2237,18 +2243,21 @@ static int audio_thread(void *arg)
                     is->audio_filter_src.freq           = frame->sample_rate;
                     last_serial                         = is->auddec.pkt_serial;
 
-                    if ((ret = configure_audio_filters(is, afilters, 1)) < 0)
+                    if ((ret = configure_audio_filters(is, afilters, 1)) < 0){
                         goto the_end;
+                    }
                 }
 
-            if ((ret = av_buffersrc_add_frame(is->in_audio_filter, frame)) < 0)
-                goto the_end;
+                if ((ret = av_buffersrc_add_frame(is->in_audio_filter, frame)) < 0){
+                    goto the_end;
+                }
 
             while ((ret = av_buffersink_get_frame_flags(is->out_audio_filter, frame, 0)) >= 0) {
                 tb = is->out_audio_filter->inputs[0]->time_base;
 #endif
-                if (!(af = frame_queue_peek_writable(&is->sampq)))
+                if (!(af = frame_queue_peek_writable(&is->sampq))){
                     goto the_end;
+                }
 
                 af->pts = (frame->pts == AV_NOPTS_VALUE) ? NAN : frame->pts * av_q2d(tb);
                 af->pos = av_frame_get_pkt_pos(frame);
@@ -2414,6 +2423,9 @@ static int subtitle_init()
         av_log(NULL, AV_LOG_ERROR, "Could not create a libass track\n");
         return AVERROR(EINVAL);
     }
+    if(subtitle_char_encoding)
+        sc->charenc = subtitle_char_encoding;
+    
     sc->sub = av_mallocz(sizeof(Subtitle));
     if(!sc->sub)
         return -1;
@@ -2560,7 +2572,7 @@ static int subtitle_open(const char * sub_file)
                     char *ass_line = sub.rects[i]->ass;
                     if (!ass_line)
                         break;
-                    /* av_log(NULL, AV_LOG_DEBUG, "process subtitle line: %s\n",ass_line); */
+                    av_log(NULL, AV_LOG_DEBUG, "subtitle line: %s\n",ass_line);
                     ass_process_data(sc->track, ass_line, strlen(ass_line));
                 }
             }
@@ -2637,7 +2649,7 @@ static int subtitle_thread(void *arg)
                     break;
                 /* av_log(NULL, AV_LOG_DEBUG, "got subtitle: %s\n", ass_line); */
                 for(j = 0; j < sc->sub->n_lines;j++){
-                    if(strcmp((const char*)ass_line, sc->sub->lines[j].ass_line) == 0){
+                    if((sp->sub.end_display_time-sp->sub.start_display_time == sc->sub->lines[j].duration) && strcmp((const char*)ass_line, sc->sub->lines[j].ass_line) == 0){
                         exist = 1;
                         break;
                     }
@@ -2650,6 +2662,7 @@ static int subtitle_thread(void *arg)
                     line_id = sc->sub->n_lines++;
                     memset(sc->sub->lines+line_id,0,sizeof(SubLine));
                     sc->sub->lines[line_id].ass_line = strdup(ass_line);
+                    sc->sub->lines[line_id].duration = sp->sub.end_display_time-sp->sub.start_display_time;
                     ass_process_data(sc->track, ass_line, strlen(ass_line));
                     sc->sub->lines[line_id].start_pts = (sc->track->events[sc->track->n_events-1]).Start;
                     sc->sub->lines[line_id].end_pts = sc->track->events[sc->track->n_events-1].Start+sc->track->events[sc->track->n_events-1].Duration;
@@ -3326,8 +3339,9 @@ static int read_thread(void *arg)
     if (st_index[AVMEDIA_TYPE_VIDEO] >= 0) {
         ret = stream_component_open(is, st_index[AVMEDIA_TYPE_VIDEO]);
     }
-    if (is->show_mode == SHOW_MODE_NONE)
+    if (is->show_mode == SHOW_MODE_NONE){
         is->show_mode = ret >= 0 ? SHOW_MODE_VIDEO : SHOW_MODE_RDFT;
+    }
 
     if (st_index[AVMEDIA_TYPE_SUBTITLE] >= 0) {
         stream_component_open(is, st_index[AVMEDIA_TYPE_SUBTITLE]);
@@ -4038,6 +4052,7 @@ static const OptionDef options[] = {
     { "vcodec", HAS_ARG | OPT_STRING | OPT_EXPERT, {    &video_codec_name }, "force video decoder",    "decoder_name" },
     { "autorotate", OPT_BOOL, { &autorotate }, "automatically rotate video", "" },
     { "sub", OPT_STRING | HAS_ARG, { &subtitle_filename }, "set external subtitle", "external subtitle" },
+    { "subenc", OPT_STRING | HAS_ARG, { &subtitle_char_encoding }, "set external subtitle char encoding", "external subtitle char encoding" },
     { NULL, },
 };
 
