@@ -203,12 +203,6 @@ typedef struct {
     ASS_Track    *track;
     char *filename;
     char *charenc;
-    char *force_style;
-    int stream_index;
-    uint8_t rgba_map[4];
-    int     pix_step[4];       ///< steps per pixel for each plane of the main output
-    int original_w, original_h;
-    int shaping;
     FFDrawContext draw;
 } SubContext;
 
@@ -320,6 +314,7 @@ typedef struct VideoState {
 static AVInputFormat *file_iformat;
 static const char *input_filename;
 static const char *window_title;
+static const char *subtitle_filename;
 static int fs_screen_width;
 static int fs_screen_height;
 static int default_width  = 640;
@@ -328,7 +323,7 @@ static int screen_width  = 0;
 static int screen_height = 0;
 static int audio_disable;
 static int video_disable;
-static int subtitle_disable;
+static int in_subtitle_disable;
 static const char* wanted_stream_spec[AVMEDIA_TYPE_NB] = {0};
 static int seek_by_bytes = -1;
 static int display_disable;
@@ -371,17 +366,6 @@ static SubContext *sc;
 #define FF_QUIT_EVENT    (SDL_USEREVENT + 2)
 
 static SDL_Surface *screen;
-/* libass supports a log level ranging from 0 to 7 */
-static const int ass_log_level_map[] = {
-    [0] = AV_LOG_FATAL,     /* MSGL_FATAL */
-    [1] = AV_LOG_ERROR,     /* MSGL_ERR */
-    [2] = AV_LOG_WARNING,   /* MSGL_WARN */
-    [3] = AV_LOG_WARNING,   /* <undefined> */
-    [4] = AV_LOG_INFO,      /* MSGL_INFO */
-    [5] = AV_LOG_INFO,      /* <undefined> */
-    [6] = AV_LOG_VERBOSE,   /* MSGL_V */
-    [7] = AV_LOG_DEBUG,     /* MSGL_DBG2 */
-};
 
 #if CONFIG_AVFILTER
 static int opt_add_vfilter(void *optctx, const char *opt, const char *arg)
@@ -1142,62 +1126,53 @@ static void video_image_display(VideoState *is)
 
     vp = frame_queue_peek(&is->pictq);
     if (vp->bmp) {
-        if (is->subtitle_st) {
-            if (frame_queue_nb_remaining(&is->subpq) > 0) {
-                sp = frame_queue_peek(&is->subpq);
+        if (is->subtitle_st && frame_queue_nb_remaining(&is->subpq) > 0) {
+            sp = frame_queue_peek(&is->subpq);
 
-                if (vp->pts >= sp->pts + ((float) sp->sub.start_display_time / 1000)) {
-                    SDL_LockYUVOverlay (vp->bmp);
+            if (vp->pts >= sp->pts + ((float) sp->sub.start_display_time / 1000)) {
+                SDL_LockYUVOverlay (vp->bmp);
 
-                    pict.data[0] = vp->bmp->pixels[0];
-                    pict.data[1] = vp->bmp->pixels[2];
-                    pict.data[2] = vp->bmp->pixels[1];
+                pict.data[0] = vp->bmp->pixels[0];
+                pict.data[1] = vp->bmp->pixels[2];
+                pict.data[2] = vp->bmp->pixels[1];
 
-                    pict.linesize[0] = vp->bmp->pitches[0];
-                    pict.linesize[1] = vp->bmp->pitches[2];
-                    pict.linesize[2] = vp->bmp->pitches[1];
+                pict.linesize[0] = vp->bmp->pitches[0];
+                pict.linesize[1] = vp->bmp->pitches[2];
+                pict.linesize[2] = vp->bmp->pitches[1];
 
-                    for (i = 0; i < sp->sub.num_rects; i++)
-                        blend_subrect(&pict, sp->sub.rects[i],
-                                      vp->bmp->w, vp->bmp->h);
+                for (i = 0; i < sp->sub.num_rects; i++)
+                    blend_subrect(&pict, sp->sub.rects[i],
+                                  vp->bmp->w, vp->bmp->h);
 
-                    SDL_UnlockYUVOverlay (vp->bmp);
-                }
+                SDL_UnlockYUVOverlay (vp->bmp);
             }
-            else {
-                /* if (sc->original_w && sc->original_h) */
-                /*     ass_set_aspect_ratio(sc->renderer, (double)vp->width / vp->height, */
-                /*                          (double)sc->original_w / sc->original_h); */
-                /* if (sc->shaping != -1) */
-                /*     ass_set_shaper(sc->renderer, sc->shaping); */
-                time_ms = vp->pts * 1000;
-                /* av_log(NULL, AV_LOG_DEBUG, "frame pts:%f, time_ms: %f\n", vp->pts, time_ms); */
-                ASS_Image *image = ass_render_frame(sc->renderer, sc->track,
-                                                    time_ms, &detect_change);
+        }
+        else if(sc){
+            time_ms = vp->pts * 1000;
+            ASS_Image *image = ass_render_frame(sc->renderer, sc->track,
+                                                time_ms, &detect_change);
 
-                /* if (detect_change) */
-                /*     av_log(NULL, AV_LOG_DEBUG, "Change happened at time ms:%f\n", time_ms); */
+            /* if (detect_change) */
+            /*     av_log(NULL, AV_LOG_DEBUG, "Change happened at time ms:%f\n", time_ms); */
 
-                for (; image; image = image->next) {
-                    av_log(NULL, AV_LOG_DEBUG, "image color, r:%d,g:%d,b:%d,a:%d\n", AR(image->color), AG(image->color), AB(image->color), AA(image->color));
-                    uint8_t rgba_color[] = {AR(image->color), AG(image->color), AB(image->color), AA(image->color)};
-                    FFDrawColor color;
-                    ff_draw_color(&sc->draw, &color, rgba_color);
-                    SDL_LockYUVOverlay (vp->bmp);
-                    pict.data[0] = vp->bmp->pixels[0];
-                    pict.data[1] = vp->bmp->pixels[2];
-                    pict.data[2] = vp->bmp->pixels[1];
+            for (; image; image = image->next) {
+                uint8_t rgba_color[] = {AR(image->color), AG(image->color), AB(image->color), AA(image->color)};
+                FFDrawColor color;
+                ff_draw_color(&sc->draw, &color, rgba_color);
+                SDL_LockYUVOverlay (vp->bmp);
+                pict.data[0] = vp->bmp->pixels[0];
+                pict.data[1] = vp->bmp->pixels[2];
+                pict.data[2] = vp->bmp->pixels[1];
 
-                    pict.linesize[0] = vp->bmp->pitches[0];
-                    pict.linesize[1] = vp->bmp->pitches[2];
-                    pict.linesize[2] = vp->bmp->pitches[1];
-                    ff_blend_mask(&sc->draw, &color,
-                                  pict.data, pict.linesize,
-                                  vp->bmp->w, vp->bmp->h,
-                                  image->bitmap, image->stride, image->w, image->h,
-                                  3, 0, image->dst_x, image->dst_y);
-                    SDL_UnlockYUVOverlay (vp->bmp);
-                }
+                pict.linesize[0] = vp->bmp->pitches[0];
+                pict.linesize[1] = vp->bmp->pitches[2];
+                pict.linesize[2] = vp->bmp->pitches[1];
+                ff_blend_mask(&sc->draw, &color,
+                              pict.data, pict.linesize,
+                              vp->bmp->w, vp->bmp->h,
+                              image->bitmap, image->stride, image->w, image->h,
+                              3, 0, image->dst_x, image->dst_y);
+                SDL_UnlockYUVOverlay (vp->bmp);
             }
         }
 
@@ -2292,6 +2267,13 @@ static void decoder_start(Decoder *d, int (*fn)(void *), void *arg)
     d->decoder_tid = SDL_CreateThread(fn, arg);
 }
 
+static void subtitle_set(enum AVPixelFormat format, int width, int height)
+{
+    ff_draw_init(&sc->draw, format, 0);
+    ass_set_frame_size(sc->renderer, width, height);
+    av_log(NULL, AV_LOG_DEBUG, "format:%d, width:%d, height: %d\n",format,width,height);
+}
+
 static int video_thread(void *arg)
 {
     VideoState *is = arg;
@@ -2343,6 +2325,9 @@ static int video_thread(void *arg)
                 SDL_PushEvent(&event);
                 goto the_end;
             }
+            if(sc){
+                subtitle_set(frame->format, frame->width, frame->height);
+            }
             filt_in  = is->in_video_filter;
             filt_out = is->out_video_filter;
             last_w = frame->width;
@@ -2392,16 +2377,6 @@ static int video_thread(void *arg)
     return 0;
 }
 
-static void sub_log(int ass_level, const char *fmt, va_list args, void *ctx)
-{
-    const int ass_level_clip = av_clip(ass_level, 0,
-        FF_ARRAY_ELEMS(ass_log_level_map) - 1);
-    const int level = ass_log_level_map[ass_level_clip];
-
-    av_log(NULL, level, fmt, args);
-    av_log(NULL, level, "\n");
-}
-
 static int subtitle_init()
 {
     sc = av_mallocz(sizeof(SubContext));
@@ -2413,31 +2388,179 @@ static int subtitle_init()
         av_log(NULL, AV_LOG_ERROR, "Could not initialize libass.\n");
         return AVERROR(EINVAL);
     }
-    ass_set_message_cb(sc->library, sub_log, NULL);
     sc->renderer = ass_renderer_init(sc->library);
     if (!sc->renderer) {
         av_log(NULL, AV_LOG_ERROR, "Could not initialize libass renderer.\n");
         return AVERROR(EINVAL);
     }
+    /* Initialize fonts */
+    ass_set_fonts(sc->renderer, NULL, NULL, 1, NULL, 1);
     sc->track = ass_new_track(sc->library);
     if (!sc->track) {
         av_log(NULL, AV_LOG_ERROR, "Could not create a libass track\n");
         return AVERROR(EINVAL);
     }
-    /* Initialize fonts */
-    ass_set_fonts(sc->renderer, NULL, NULL, 1, NULL, 1);
 }
 
 static void subtitle_uninit()
 {
-    if (sc->track)
-        ass_free_track(sc->track);
-    if (sc->renderer)
-        ass_renderer_done(sc->renderer);
-    if (sc->library)
-        ass_library_done(sc->library);
-    av_free(sc);
-    sc = NULL;
+    if(sc){
+        if (sc->track)
+            ass_free_track(sc->track);
+        if (sc->renderer)
+            ass_renderer_done(sc->renderer);
+        if (sc->library)
+            ass_library_done(sc->library);
+        av_free(sc);
+        sc = NULL;
+    }
+}
+
+static const char * const font_mimetypes[] = {
+    "application/x-truetype-font",
+    "application/vnd.ms-opentype",
+    "application/x-font-ttf",
+    NULL
+};
+
+static int attachment_is_font(AVStream * st)
+{
+    const AVDictionaryEntry *tag = NULL;
+    int n;
+
+    tag = av_dict_get(st->metadata, "mimetype", NULL, AV_DICT_MATCH_CASE);
+
+    if (tag) {
+        for (n = 0; font_mimetypes[n]; n++) {
+            if (av_strcasecmp(font_mimetypes[n], tag->value) == 0)
+                return 1;
+        }
+    }
+    return 0;
+}
+
+static int subtitle_open(const char * sub_file)
+{
+    int j, ret, sid;
+    int k = 0;
+    AVDictionary *codec_opts = NULL;
+    AVFormatContext *fmt = NULL;
+    AVCodecContext *dec_ctx = NULL;
+    AVCodec *dec = NULL;
+    const AVCodecDescriptor *dec_desc;
+    AVStream *st;
+    AVPacket pkt;
+
+    ret = subtitle_init();
+    if (ret < 0) {
+        av_log(NULL, AV_LOG_ERROR, "Unable to init libass\n");
+        goto end;
+    }
+    /* else{ */
+    /*     av_log(NULL, AV_LOG_DEBUG, "subtitle init successfully\n"); */
+    /* } */
+    /* Open subtitles file */
+    ret = avformat_open_input(&fmt, sub_file, NULL, NULL);
+    if (ret < 0) {
+        av_log(NULL, AV_LOG_ERROR, "Unable to open %s\n", sub_file);
+        goto end;
+    }
+    ret = avformat_find_stream_info(fmt, NULL);
+    if (ret < 0)
+        goto end;
+
+    /* Locate subtitles stream */
+    ret = av_find_best_stream(fmt, AVMEDIA_TYPE_SUBTITLE, -1, -1, NULL, 0);
+
+    if (ret < 0) {
+        av_log(NULL, AV_LOG_ERROR, "Unable to locate subtitle stream in %s\n",sub_file);
+        goto end;
+    }
+    sid = ret;
+    st = fmt->streams[sid];
+
+    /* Load attached fonts */
+    for (j = 0; j < fmt->nb_streams; j++) {
+        AVStream *st = fmt->streams[j];
+        if (st->codec->codec_type == AVMEDIA_TYPE_ATTACHMENT &&
+            attachment_is_font(st)) {
+            const AVDictionaryEntry *tag = NULL;
+            tag = av_dict_get(st->metadata, "filename", NULL,
+                              AV_DICT_MATCH_CASE);
+
+            if (tag) {
+                av_log(NULL, AV_LOG_DEBUG, "Loading attached font: %s\n",
+                       tag->value);
+                ass_add_font(sc->library, tag->value,
+                             st->codec->extradata,
+                             st->codec->extradata_size);
+            } else {
+                av_log(NULL, AV_LOG_WARNING,
+                       "Font attachment has no filename, ignored.\n");
+            }
+        }
+    }
+
+    /* Open decoder */
+    dec_ctx = st->codec;
+    dec = avcodec_find_decoder(dec_ctx->codec_id);
+    if (!dec) {
+        av_log(NULL, AV_LOG_ERROR, "Failed to find subtitle codec %s\n",
+               avcodec_get_name(dec_ctx->codec_id));
+        return AVERROR(EINVAL);
+    }
+    dec_desc = avcodec_descriptor_get(dec_ctx->codec_id);
+    if (dec_desc && !(dec_desc->props & AV_CODEC_PROP_TEXT_SUB)) {
+        av_log(NULL, AV_LOG_ERROR,
+               "Only text based subtitles are currently supported\n");
+        return AVERROR_PATCHWELCOME;
+    }
+    if (sc->charenc)
+        av_dict_set(&codec_opts, "sub_charenc", sc->charenc, 0);
+    ret = avcodec_open2(dec_ctx, dec, &codec_opts);
+    if (ret < 0)
+        goto end;
+
+    /* Decode subtitles and push them into the renderer (libass) */
+    if (dec_ctx->subtitle_header)
+        ass_process_codec_private(sc->track,
+                                  dec_ctx->subtitle_header,
+                                  dec_ctx->subtitle_header_size);
+    av_init_packet(&pkt);
+    pkt.data = NULL;
+    pkt.size = 0;
+    while (av_read_frame(fmt, &pkt) >= 0) {
+        int i, got_subtitle;
+        AVSubtitle sub = {0};
+
+        if (pkt.stream_index == sid) {
+            ret = avcodec_decode_subtitle2(dec_ctx, &sub, &got_subtitle, &pkt);
+            if (ret < 0) {
+                av_log(NULL, AV_LOG_WARNING, "Error decoding: %s (ignored)\n",
+                       av_err2str(ret));
+            } else if (got_subtitle) {
+                for (i = 0; i < sub.num_rects; i++) {
+                    char *ass_line = sub.rects[i]->ass;
+                    if (!ass_line)
+                        break;
+                    /* av_log(NULL, AV_LOG_DEBUG, "process subtitle line: %s\n",ass_line); */
+                    ass_process_data(sc->track, ass_line, strlen(ass_line));
+                }
+            }
+        }
+        av_free_packet(&pkt);
+        avsubtitle_free(&sub);
+    }
+
+end:
+    av_dict_free(&codec_opts);
+    if (dec_ctx)
+        avcodec_close(dec_ctx);
+    if (fmt)
+        avformat_close_input(&fmt);
+    if(ret < 0)
+        subtitle_uninit();
+    return ret;
 }
 
 static int subtitle_thread(void *arg)
@@ -2446,16 +2569,19 @@ static int subtitle_thread(void *arg)
     Frame *sp;
     int got_subtitle;
     double pts;
+    int ret;
     int i, j;
     int r, g, b, y, u, v, a;
 
-    subtitle_init();
+    ret = subtitle_init();
+    if (ret < 0) {
+        av_log(NULL, AV_LOG_ERROR, "Unable to init libass\n");
+        return -1;
+    }
     /* Decode subtitles and push them into the renderer (libass) */
-    if (is->subdec.avctx != NULL && (is->subdec.avctx)->subtitle_header != NULL)
-        av_log(NULL, AV_LOG_DEBUG,"subtitle_header, size:%d, content:%s\nstrlen:%d\n", (is->subdec.avctx)->subtitle_header_size,(is->subdec.avctx)->subtitle_header,strlen((is->subdec.avctx)->subtitle_header));
-        /* ass_process_codec_private(sc->track,(is->subdec.avctx)->subtitle_header,(is->subdec.avctx)->subtitle_header_size); */
-    ff_draw_init(&sc->draw, 0, 0);
-    ass_set_frame_size(sc->renderer, 960, 540);
+    if (is->subdec.avctx != NULL && (is->subdec.avctx)->subtitle_header != NULL){
+        ass_process_codec_private(sc->track,(is->subdec.avctx)->subtitle_header,(is->subdec.avctx)->subtitle_header_size);
+    }
     for (;;) {
         if (!(sp = frame_queue_peek_writable(&is->subpq)))
             return 0;
@@ -2488,12 +2614,15 @@ static int subtitle_thread(void *arg)
         } else if (got_subtitle) {
             for (i = 0; i < sp->sub.num_rects; i++) {
                 char *ass_line = sp->sub.rects[i]->ass;
+                int exist = 0;
                 if (!ass_line)
                     break;
                 /* av_log(NULL, AV_LOG_DEBUG, "got subtitle: %s\n", ass_line); */
+                /* for(j = 0; j < sc->track->n_events;j++){ */
+                /*     if(strcmp) */
+                /* } */
                 ass_process_data(sc->track, ass_line, strlen(ass_line));
                 /* av_log(NULL, AV_LOG_DEBUG, "subtitle pts : %f\n", sp->sub.pts); */
-                /* ass_process_chunk(sc->track, ass_line, strlen(ass_line), sp->sub.pts / AV_TIME_BASE, sp->sub.end_display_time - sp->sub.start_display_time); */
             }
             /* av_log(NULL,AV_LOG_DEBUG, "subtitle event number:%d\n", sc->track->n_events); */
             avsubtitle_free(&sp->sub);
@@ -2960,6 +3089,7 @@ static void stream_component_close(VideoState *is, int stream_index)
     case AVMEDIA_TYPE_SUBTITLE:
         decoder_abort(&is->subdec, &is->subpq);
         decoder_destroy(&is->subdec);
+        subtitle_uninit();
         break;
     default:
         break;
@@ -2979,7 +3109,6 @@ static void stream_component_close(VideoState *is, int stream_index)
     case AVMEDIA_TYPE_SUBTITLE:
         is->subtitle_st = NULL;
         is->subtitle_stream = -1;
-        subtitle_uninit();
         break;
     default:
         break;
@@ -3136,7 +3265,7 @@ static int read_thread(void *arg)
                                 st_index[AVMEDIA_TYPE_AUDIO],
                                 st_index[AVMEDIA_TYPE_VIDEO],
                                 NULL, 0);
-    if (!video_disable && !subtitle_disable)
+    if (!video_disable && !in_subtitle_disable)
         st_index[AVMEDIA_TYPE_SUBTITLE] =
             av_find_best_stream(ic, AVMEDIA_TYPE_SUBTITLE,
                                 st_index[AVMEDIA_TYPE_SUBTITLE],
@@ -3838,7 +3967,7 @@ static const OptionDef options[] = {
     { "fs", OPT_BOOL, { &is_full_screen }, "force full screen" },
     { "an", OPT_BOOL, { &audio_disable }, "disable audio" },
     { "vn", OPT_BOOL, { &video_disable }, "disable video" },
-    { "sn", OPT_BOOL, { &subtitle_disable }, "disable subtitling" },
+    { "sn", OPT_BOOL, { &in_subtitle_disable }, "disable internal subtitling" },
     { "ast", OPT_STRING | HAS_ARG | OPT_EXPERT, { &wanted_stream_spec[AVMEDIA_TYPE_AUDIO] }, "select desired audio stream", "stream_specifier" },
     { "vst", OPT_STRING | HAS_ARG | OPT_EXPERT, { &wanted_stream_spec[AVMEDIA_TYPE_VIDEO] }, "select desired video stream", "stream_specifier" },
     { "sst", OPT_STRING | HAS_ARG | OPT_EXPERT, { &wanted_stream_spec[AVMEDIA_TYPE_SUBTITLE] }, "select desired subtitle stream", "stream_specifier" },
@@ -3874,6 +4003,7 @@ static const OptionDef options[] = {
     { "scodec", HAS_ARG | OPT_STRING | OPT_EXPERT, { &subtitle_codec_name }, "force subtitle decoder", "decoder_name" },
     { "vcodec", HAS_ARG | OPT_STRING | OPT_EXPERT, {    &video_codec_name }, "force video decoder",    "decoder_name" },
     { "autorotate", OPT_BOOL, { &autorotate }, "automatically rotate video", "" },
+    { "sub", OPT_STRING | HAS_ARG, { &subtitle_filename }, "set external subtitle", "external subtitle" },
     { NULL, },
 };
 
@@ -4005,6 +4135,11 @@ int main(int argc, char **argv)
 
     av_init_packet(&flush_pkt);
     flush_pkt.data = (uint8_t *)&flush_pkt;
+
+    if(subtitle_filename){
+        in_subtitle_disable = 1;
+        subtitle_open(subtitle_filename);
+    }
 
     is = stream_open(input_filename, file_iformat);
     if (!is) {
