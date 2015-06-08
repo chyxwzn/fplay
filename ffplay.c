@@ -198,8 +198,8 @@ typedef struct Decoder {
 } Decoder;
 
 typedef struct {
-    int64_t start_pts; //ms
-    int64_t end_pts;
+    int64_t start_pts_ms; //ms
+    int64_t end_pts_ms;
     int32_t duration;
     char * ass_line;
     char * text;
@@ -359,8 +359,9 @@ static const char *video_codec_name;
 double audio_disp_speed = 0.02;
 int show_subtitle = 1;
 int repeat_times = 0;
-double repeat_pts = 0;
-double repeat_duration = 0;
+double seek_pts = 0;
+double repeat_start_pts = 0;
+double repeat_end_pts = 0;
 static int64_t cursor_last_shown;
 static int cursor_hidden = 0;
 #if CONFIG_AVFILTER
@@ -1494,6 +1495,7 @@ static void stream_seek(VideoState *is, int64_t pos, int64_t rel, int seek_by_by
     if (!is->seek_req) {
         is->seek_pos = pos;
         is->seek_rel = rel;
+        av_log(NULL, AV_LOG_DEBUG, "seek_pos:%ld, seek relative:%ld\n", is->seek_pos, is->seek_rel);
         is->seek_flags &= ~AVSEEK_FLAG_BYTE;
         if (seek_by_bytes)
             is->seek_flags |= AVSEEK_FLAG_BYTE;
@@ -2514,8 +2516,9 @@ static int subtitle_open(const char * sub_file)
                     char *ass_line = sub.rects[i]->ass;
                     if (!ass_line)
                         break;
-                    av_log(NULL, AV_LOG_DEBUG, "subtitle line: %s\n",ass_line);
+                    /* av_log(NULL, AV_LOG_DEBUG, "subtitle line: %s\n",ass_line); */
                     ass_process_data(sc->track, ass_line, strlen(ass_line));
+                    /* av_log(NULL, AV_LOG_DEBUG, "line:%d, start pts:%f, end pts:%f\n", line_id, sc->lines[line_id].start_pts_ms/1000, sc->lines[line_id].end_pts_ms/1000); */
                 }
             }
         }
@@ -2597,6 +2600,7 @@ static int subtitle_thread(void *arg)
                     }
                 }
                 if(!exist){
+                    ASS_Event *event = NULL;
                     if(sc->n_lines == sc->max_lines){
                         sc->max_lines = sc->max_lines * 2 + 1;
                         sc->lines = (SubLine*)realloc(sc->lines,sizeof(SubLine)*sc->max_lines);
@@ -2606,9 +2610,12 @@ static int subtitle_thread(void *arg)
                     sc->lines[line_id].ass_line = strdup(ass_line);
                     sc->lines[line_id].duration = sp->sub.end_display_time-sp->sub.start_display_time;
                     ass_process_data(sc->track, ass_line, strlen(ass_line));
-                    sc->lines[line_id].start_pts = (sc->track->events[sc->track->n_events-1]).Start;
-                    sc->lines[line_id].end_pts = sc->track->events[sc->track->n_events-1].Start+sc->track->events[sc->track->n_events-1].Duration;
-                    sc->lines[line_id].text = strdup(sc->track->events[sc->track->n_events-1].Text);
+                    event = sc->track->events+(sc->track->n_events-1);
+                    sc->lines[line_id].start_pts_ms = event->Start;
+                    sc->lines[line_id].end_pts_ms = event->Start+event->Duration;
+                    sc->lines[line_id].text = strdup(event->Text);
+                    av_log(NULL, AV_LOG_DEBUG, "subtitle line: %s\n",ass_line);
+                    av_log(NULL, AV_LOG_DEBUG, "line:%d, start pts:%ld, end pts:%ld, text:%s\n\n", line_id, sc->lines[line_id].start_pts_ms, sc->lines[line_id].end_pts_ms, sc->lines[line_id].text);
                 }
 
                 /* av_log(NULL, AV_LOG_DEBUG, "subtitle pts : %f\n", sp->sub.pts); */
@@ -3671,19 +3678,47 @@ static void do_seek_stream(VideoState *s, double incr)
     }
 }
 
-static double get_repeat_params()
+typedef enum {
+    SEEK_PREVIOUS,
+    REPEAT_CURRENT,
+    SEEK_NEXT
+}SeekType;
+
+static void get_seek_params(double cur_pts, SeekType type)
 {
-    double cur_pts = 0;
     int i;
-    cur_pts = get_master_clock(cur_stream);
+    int64_t cur_pts_ms = (int64_t)cur_pts * 1000;
     for(i = 0; i < sc->n_lines; i++){
-        if(cur_pts > sc->lines[i].start_pts && cur_pos < sc->sc->lines[i].end_pts){
-            repeat_pts = sc->lines[i].end_pts;
-            repeat_duration = sc->lines[i].duration;
+        if(cur_pts_ms > sc->lines[i].start_pts_ms && cur_pts_ms < sc->lines[i].end_pts_ms){
+            switch(type){
+                case SEEK_PREVIOUS:
+                    if(i > 0){
+                        seek_pts = sc->lines[i-1].start_pts_ms / 1000;
+                    }
+                    else{
+                        seek_pts = cur_pts;
+                    }
+                    av_log(NULL, AV_LOG_DEBUG, "text:%s, seek pts:%lf, current pts:%lf, start pts:%ld, end pts:%ld\n", sc->lines[i].text, seek_pts, cur_pts, sc->lines[i].start_pts_ms, sc->lines[i].end_pts_ms);
+                    break;
+                case REPEAT_CURRENT:
+                    repeat_start_pts = sc->lines[i].start_pts_ms / 1000;
+                    repeat_end_pts = sc->lines[i].end_pts_ms / 1000;
+                    break;
+                case SEEK_NEXT:
+                    if(i+1 < sc->n_lines){
+                        seek_pts = sc->lines[i+1].start_pts_ms / 1000;
+                    }
+                    else{
+                        seek_pts = cur_pts;
+                    }
+                    break;
+                default:
+                    seek_pts = cur_pts;
+                    break;
+            }
             break;
         }
     }
-    return cur_pts;
 }
 
 /* handle an event sent by the GUI */
@@ -3757,36 +3792,40 @@ static void event_loop(VideoState *cur_stream)
             case SDLK_8:
             case SDLK_9:
                 repeat_times = event.key.keysym.sym - SDLK_0;
-                get_repeat_params();
+                cur_pts = get_master_clock(cur_stream);
+                get_seek_params(cur_pts, REPEAT_CURRENT);
                 break;
             case SDLK_PAGEUP:
                 if (cur_stream->ic->nb_chapters <= 1) {
                     incr = 600.0;
-                    goto do_seek;
+                    do_seek_stream(cur_stream, incr);
                 }
                 seek_chapter(cur_stream, 1);
                 break;
             case SDLK_PAGEDOWN:
                 if (cur_stream->ic->nb_chapters <= 1) {
                     incr = -600.0;
-                    goto do_seek;
+                    do_seek_stream(cur_stream, incr);
                 }
                 seek_chapter(cur_stream, -1);
                 break;
             case SDLK_LEFT:
-                cur_pos = get_repeat_params();
-                incr = -1;
-                goto do_seek;
+                cur_pts = get_master_clock(cur_stream);
+                get_seek_params(cur_pts, SEEK_PREVIOUS);
+                incr = seek_pts - cur_pts;
+                do_seek_stream(cur_stream, incr);
             case SDLK_RIGHT:
-                cur_pos = get_repeat_params();
-                incr = 1;
-                goto do_seek;
+                cur_pts = get_master_clock(cur_stream);
+                get_seek_params(cur_pts, SEEK_NEXT);
+                incr = seek_pts - cur_pts;
+                do_seek_stream(cur_stream, incr);
+                break;
             case SDLK_UP:
                 incr = 60.0;
-                goto do_seek;
+                do_seek_stream(cur_stream, incr);
+                break;
             case SDLK_DOWN:
                 incr = -60.0;
-            do_seek:
                 do_seek_stream(cur_stream, incr);
                 break;
             default:
