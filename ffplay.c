@@ -206,19 +206,16 @@ typedef struct {
 }SubLine;
 
 typedef struct {
-    int max_lines;
-    int n_lines;
-    SubLine * lines;
-}Subtitle;
-
-typedef struct {
     ASS_Library  *library;
     ASS_Renderer *renderer;
     ASS_Track    *track;
-    Subtitle *sub;
     const char *filename;
     const char *charenc;
     FFDrawContext draw;
+    int max_lines;
+    int n_lines;
+    SubLine * lines;
+    SDL_Overlay *bmp;
 } SubContext;
 
 typedef struct VideoState {
@@ -283,10 +280,6 @@ typedef struct VideoState {
     } show_mode;
     int16_t sample_array[SAMPLE_ARRAY_SIZE];
     int sample_array_index;
-    int last_i_start;
-    RDFTContext *rdft;
-    int rdft_bits;
-    FFTSample *rdft_data;
     int xpos;
     double last_vis_time;
 
@@ -310,6 +303,7 @@ typedef struct VideoState {
     char filename[1024];
     int width, height, xleft, ytop;
     int step;
+    double pts;
 
 #if CONFIG_AVFILTER
     int vfilter_idx;
@@ -331,10 +325,11 @@ static const char *input_filename;
 static const char *window_title;
 static const char *subtitle_filename;
 static const char *subtitle_char_encoding;
+static char *force_style;
 static int fs_screen_width;
 static int fs_screen_height;
-static int default_width  = 640;
-static int default_height = 480;
+static int default_width  = 480;
+static int default_height = 270;
 static int screen_width  = 0;
 static int screen_height = 0;
 static int audio_disable;
@@ -361,7 +356,11 @@ static enum ShowMode show_mode = SHOW_MODE_NONE;
 static const char *audio_codec_name;
 static const char *subtitle_codec_name;
 static const char *video_codec_name;
-double rdftspeed = 0.02;
+double audio_disp_speed = 0.02;
+int show_subtitle = 1;
+int repeat_times = 0;
+double repeat_pts = 0;
+double repeat_duration = 0;
 static int64_t cursor_last_shown;
 static int cursor_hidden = 0;
 #if CONFIG_AVFILTER
@@ -1130,6 +1129,67 @@ static void calculate_display_rect(SDL_Rect *rect,
 #define AB(c)  (((c)>>8) &0xFF)
 #define AA(c)  ((0xFF-(c)) &0xFF)
 
+static void rgb2yuv(int r, int g, int b, int *y, int *u, int *v)
+{
+    int y0, u0, v0;
+
+    y0 =  66*r + 129*g +  25*b;
+    u0 = -38*r + -74*g + 112*b;
+    v0 = 112*r + -94*g + -18*b;
+
+    y0 = (y0+128)>>8;
+    u0 = (u0+128)>>8;
+    v0 = (v0+128)>>8;
+
+    *y = y0 + 16;
+    *u = u0 + 128;
+    *v = v0 + 128;
+}
+
+static void blend_text_subtitle(SDL_Overlay *bmp, double pts, int clear)
+{
+    int detect_change = 0;
+    double time_ms = 0;
+    AVPicture pict;
+
+    time_ms = pts * 1000;
+    ASS_Image *image = ass_render_frame(sc->renderer, sc->track,
+                                        time_ms, &detect_change);
+
+    /* if (detect_change) */
+    /*     av_log(NULL, AV_LOG_DEBUG, "Change happened at time ms:%f\n", time_ms); */
+
+    SDL_LockYUVOverlay(bmp);
+    if(clear){
+        int y,u,v;
+        rgb2yuv(0, 0, 0, &y, &u, &v);
+        memset(bmp->pixels[0], y, bmp->pitches[0] * bmp->h);
+        memset(bmp->pixels[2], u, bmp->pitches[2] * bmp->h);
+        memset(bmp->pixels[1], v, bmp->pitches[1] * bmp->h);
+    }
+
+    if(show_subtitle){
+        pict.data[0] = bmp->pixels[0];
+        pict.data[1] = bmp->pixels[2];
+        pict.data[2] = bmp->pixels[1];
+
+        pict.linesize[0] = bmp->pitches[0];
+        pict.linesize[1] = bmp->pitches[2];
+        pict.linesize[2] = bmp->pitches[1];
+        for (; image; image = image->next) {
+            uint8_t rgba_color[] = {AR(image->color), AG(image->color), AB(image->color), AA(image->color)};
+            FFDrawColor color;
+            ff_draw_color(&sc->draw, &color, rgba_color);
+            ff_blend_mask(&sc->draw, &color,
+                          pict.data, pict.linesize,
+                          bmp->w, bmp->h,
+                          image->bitmap, image->stride, image->w, image->h,
+                          3, 0, image->dst_x, image->dst_y);
+        }
+    }
+    SDL_UnlockYUVOverlay(bmp);
+}
+
 static void video_image_display(VideoState *is)
 {
     Frame *vp;
@@ -1137,8 +1197,6 @@ static void video_image_display(VideoState *is)
     AVPicture pict;
     SDL_Rect rect;
     int i;
-    int detect_change = 0;
-    double time_ms = 0;
 
     vp = frame_queue_peek(&is->pictq);
     if (vp->bmp) {
@@ -1164,32 +1222,7 @@ static void video_image_display(VideoState *is)
             }
         }
         else if(sc){
-            time_ms = vp->pts * 1000;
-            ASS_Image *image = ass_render_frame(sc->renderer, sc->track,
-                                                time_ms, &detect_change);
-
-            /* if (detect_change) */
-            /*     av_log(NULL, AV_LOG_DEBUG, "Change happened at time ms:%f\n", time_ms); */
-
-            for (; image; image = image->next) {
-                uint8_t rgba_color[] = {AR(image->color), AG(image->color), AB(image->color), AA(image->color)};
-                FFDrawColor color;
-                ff_draw_color(&sc->draw, &color, rgba_color);
-                SDL_LockYUVOverlay (vp->bmp);
-                pict.data[0] = vp->bmp->pixels[0];
-                pict.data[1] = vp->bmp->pixels[2];
-                pict.data[2] = vp->bmp->pixels[1];
-
-                pict.linesize[0] = vp->bmp->pitches[0];
-                pict.linesize[1] = vp->bmp->pitches[2];
-                pict.linesize[2] = vp->bmp->pitches[1];
-                ff_blend_mask(&sc->draw, &color,
-                              pict.data, pict.linesize,
-                              vp->bmp->w, vp->bmp->h,
-                              image->bitmap, image->stride, image->w, image->h,
-                              3, 0, image->dst_x, image->dst_y);
-                SDL_UnlockYUVOverlay (vp->bmp);
-            }
+            blend_text_subtitle(vp->bmp, vp->pts, 0);
         }
 
         /* av_log(NULL, AV_LOG_DEBUG,"is->xleft:%d, is->ytop:%d, is->width:%d, is->height:%d, vp->width:%d, vp->height:%d, vp->sar:%d",is->xleft, is->ytop, is->width, is->height, vp->width, vp->height, vp->sar); */
@@ -1210,148 +1243,20 @@ static inline int compute_mod(int a, int b)
     return a < 0 ? a%b + b : a%b;
 }
 
+static double get_master_clock(VideoState *is);
+
 static void video_audio_display(VideoState *s)
 {
-    int i, i_start, x, y1, y, ys, delay, n, nb_display_channels;
-    int ch, channels, h, h2, bgcolor, fgcolor;
-    int64_t time_diff;
-    int rdft_bits, nb_freq;
+    if(sc){
+        SDL_Rect rect;
 
-    for (rdft_bits = 1; (1 << rdft_bits) < 2 * s->height; rdft_bits++)
-        ;
-    nb_freq = 1 << (rdft_bits - 1);
+        rect.x = s->xleft;
+        rect.y = s->ytop;
+        rect.w = s->width;
+        rect.h = s->height;
 
-    /* compute display index : center on currently output samples */
-    channels = s->audio_tgt.channels;
-    nb_display_channels = channels;
-    /* av_log(NULL,AV_LOG_DEBUG,"audio_display\n"); */
-    if (!s->paused) {
-        int data_used= s->show_mode == SHOW_MODE_WAVES ? s->width : (2*nb_freq);
-        n = 2 * channels;
-        delay = s->audio_write_buf_size;
-        delay /= n;
-
-        /* to be more precise, we take into account the time spent since
-           the last buffer computation */
-        if (audio_callback_time) {
-            time_diff = av_gettime_relative() - audio_callback_time;
-            delay -= (time_diff * s->audio_tgt.freq) / 1000000;
-        }
-
-        delay += 2 * data_used;
-        if (delay < data_used)
-            delay = data_used;
-
-        i_start= x = compute_mod(s->sample_array_index - delay * channels, SAMPLE_ARRAY_SIZE);
-        if (s->show_mode == SHOW_MODE_WAVES) {
-            h = INT_MIN;
-            for (i = 0; i < 1000; i += channels) {
-                int idx = (SAMPLE_ARRAY_SIZE + x - i) % SAMPLE_ARRAY_SIZE;
-                int a = s->sample_array[idx];
-                int b = s->sample_array[(idx + 4 * channels) % SAMPLE_ARRAY_SIZE];
-                int c = s->sample_array[(idx + 5 * channels) % SAMPLE_ARRAY_SIZE];
-                int d = s->sample_array[(idx + 9 * channels) % SAMPLE_ARRAY_SIZE];
-                int score = a - d;
-                if (h < score && (b ^ c) < 0) {
-                    h = score;
-                    i_start = idx;
-                }
-            }
-        }
-
-        s->last_i_start = i_start;
-    } else {
-        i_start = s->last_i_start;
-    }
-
-    bgcolor = SDL_MapRGB(screen->format, 0x00, 0x00, 0x00);
-    if (s->show_mode == SHOW_MODE_WAVES) {
-        fill_rectangle(screen,
-                       s->xleft, s->ytop, s->width, s->height,
-                       bgcolor, 0);
-
-        fgcolor = SDL_MapRGB(screen->format, 0xff, 0xff, 0xff);
-
-        /* total height for one channel */
-        h = s->height / nb_display_channels;
-        /* graph height / 2 */
-        h2 = (h * 9) / 20;
-        for (ch = 0; ch < nb_display_channels; ch++) {
-            i = i_start + ch;
-            y1 = s->ytop + ch * h + (h / 2); /* position of center line */
-            for (x = 0; x < s->width; x++) {
-                y = (s->sample_array[i] * h2) >> 15;
-                if (y < 0) {
-                    y = -y;
-                    ys = y1 - y;
-                } else {
-                    ys = y1;
-                }
-                fill_rectangle(screen,
-                               s->xleft + x, ys, 1, y,
-                               fgcolor, 0);
-                i += channels;
-                if (i >= SAMPLE_ARRAY_SIZE)
-                    i -= SAMPLE_ARRAY_SIZE;
-            }
-        }
-
-        fgcolor = SDL_MapRGB(screen->format, 0x00, 0x00, 0xff);
-
-        for (ch = 1; ch < nb_display_channels; ch++) {
-            y = s->ytop + ch * h;
-            fill_rectangle(screen,
-                           s->xleft, y, s->width, 1,
-                           fgcolor, 0);
-        }
-        SDL_UpdateRect(screen, s->xleft, s->ytop, s->width, s->height);
-    } else {
-        nb_display_channels= FFMIN(nb_display_channels, 2);
-        if (rdft_bits != s->rdft_bits) {
-            av_rdft_end(s->rdft);
-            av_free(s->rdft_data);
-            s->rdft = av_rdft_init(rdft_bits, DFT_R2C);
-            s->rdft_bits = rdft_bits;
-            s->rdft_data = av_malloc_array(nb_freq, 4 *sizeof(*s->rdft_data));
-        }
-        if (!s->rdft || !s->rdft_data){
-            av_log(NULL, AV_LOG_ERROR, "Failed to allocate buffers for RDFT, switching to waves display\n");
-            s->show_mode = SHOW_MODE_WAVES;
-        } else {
-            FFTSample *data[2];
-            for (ch = 0; ch < nb_display_channels; ch++) {
-                data[ch] = s->rdft_data + 2 * nb_freq * ch;
-                i = i_start + ch;
-                for (x = 0; x < 2 * nb_freq; x++) {
-                    double w = (x-nb_freq) * (1.0 / nb_freq);
-                    data[ch][x] = s->sample_array[i] * (1.0 - w * w);
-                    i += channels;
-                    if (i >= SAMPLE_ARRAY_SIZE)
-                        i -= SAMPLE_ARRAY_SIZE;
-                }
-                av_rdft_calc(s->rdft, data[ch]);
-            }
-            /* Least efficient way to do this, we should of course
-             * directly access it but it is more than fast enough. */
-            for (y = 0; y < s->height; y++) {
-                double w = 1 / sqrt(nb_freq);
-                int a = sqrt(w * sqrt(data[0][2 * y + 0] * data[0][2 * y + 0] + data[0][2 * y + 1] * data[0][2 * y + 1]));
-                int b = (nb_display_channels == 2 ) ? sqrt(w * sqrt(data[1][2 * y + 0] * data[1][2 * y + 0]
-                       + data[1][2 * y + 1] * data[1][2 * y + 1])) : a;
-                a = FFMIN(a, 255);
-                b = FFMIN(b, 255);
-                fgcolor = SDL_MapRGB(screen->format, a, b, (a + b) / 2);
-
-                fill_rectangle(screen,
-                            s->xpos, s->height-y, 1, 1,
-                            fgcolor, 0);
-            }
-        }
-        SDL_UpdateRect(screen, s->xpos, s->ytop, 1, s->height);
-        if (!s->paused)
-            s->xpos++;
-        if (s->xpos >= s->width)
-            s->xpos= s->xleft;
+        blend_text_subtitle(sc->bmp, get_master_clock(s), 1);
+        SDL_DisplayYUVOverlay(sc->bmp, &rect);
     }
 }
 
@@ -1406,6 +1311,13 @@ static void set_default_window_size(int width, int height, AVRational sar)
     default_height = rect.h;
 }
 
+static void subtitle_set(enum AVPixelFormat format, int width, int height)
+{
+    ff_draw_init(&sc->draw, format, 0);
+    ass_set_frame_size(sc->renderer, width, height);
+    /* av_log(NULL, AV_LOG_DEBUG, "format:%d, width:%d, height: %d\n",format,width,height); */
+}
+
 static int video_open(VideoState *is, int force_set_video_mode, Frame *vp)
 {
     int flags = SDL_HWSURFACE | SDL_ASYNCBLIT | SDL_HWACCEL;
@@ -1443,6 +1355,23 @@ static int video_open(VideoState *is, int force_set_video_mode, Frame *vp)
     if (!window_title)
         window_title = input_filename;
     SDL_WM_SetCaption(window_title, window_title);
+    if (is->audio_st && is->show_mode != SHOW_MODE_VIDEO && sc){
+        int64_t bufferdiff;
+        sc->bmp = SDL_CreateYUVOverlay(w, h,
+                                       SDL_YV12_OVERLAY,
+                                       screen);
+        bufferdiff = sc->bmp ? FFMAX(sc->bmp->pixels[0], sc->bmp->pixels[1]) - FFMIN(sc->bmp->pixels[0], sc->bmp->pixels[1]) : 0;
+        if (!sc->bmp || sc->bmp->pitches[0] < w || bufferdiff < (int64_t)h * sc->bmp->pitches[0]) {
+            /* SDL allocates a buffer smaller than requested if the video
+             * overlay hardware is unable to support the requested size. */
+            av_log(NULL, AV_LOG_FATAL,
+                   "Error: the video system does not support an image\n"
+                            "size of %dx%d pixels. Try using -lowres or -vf \"scale=w:h\"\n"
+                            "to reduce the image size.\n", w, h );
+            do_exit(is);
+        }
+        subtitle_set(0, w, h);
+    }
 
     is->width  = screen->w;
     is->height = screen->h;
@@ -1662,11 +1591,11 @@ static void video_refresh(void *opaque, double *remaining_time)
 
     if (!display_disable && is->show_mode != SHOW_MODE_VIDEO && is->audio_st) {
         time = av_gettime_relative() / 1000000.0;
-        if (is->force_refresh || is->last_vis_time + rdftspeed < time) {
+        if (is->force_refresh || is->last_vis_time + audio_disp_speed < time) {
             video_display(is);
             is->last_vis_time = time;
         }
-        *remaining_time = FFMIN(*remaining_time, is->last_vis_time + rdftspeed - time);
+        *remaining_time = FFMIN(*remaining_time, is->last_vis_time + audio_disp_speed - time);
     }
 
     if (is->video_st) {
@@ -1867,7 +1796,6 @@ static int queue_picture(VideoState *is, AVFrame *src_frame, double pts, double 
         return -1;
 
     vp->sar = src_frame->sample_aspect_ratio;
-    vp->frame->format = src_frame->format;
 
     /* alloc or resize hardware picture buffer */
     if (!vp->bmp || vp->reallocate || !vp->allocated ||
@@ -2290,13 +2218,6 @@ static void decoder_start(Decoder *d, int (*fn)(void *), void *arg)
     d->decoder_tid = SDL_CreateThread(fn, arg);
 }
 
-static void subtitle_set(enum AVPixelFormat format, int width, int height)
-{
-    ff_draw_init(&sc->draw, format, 0);
-    ass_set_frame_size(sc->renderer, width, height);
-    av_log(NULL, AV_LOG_DEBUG, "format:%d, width:%d, height: %d\n",format,width,height);
-}
-
 static int video_thread(void *arg)
 {
     VideoState *is = arg;
@@ -2425,10 +2346,6 @@ static int subtitle_init()
     }
     if(subtitle_char_encoding)
         sc->charenc = subtitle_char_encoding;
-    
-    sc->sub = av_mallocz(sizeof(Subtitle));
-    if(!sc->sub)
-        return -1;
 }
 
 static void subtitle_uninit()
@@ -2440,6 +2357,10 @@ static void subtitle_uninit()
             ass_renderer_done(sc->renderer);
         if (sc->library)
             ass_library_done(sc->library);
+        if (sc->bmp){
+             SDL_FreeYUVOverlay(sc->bmp);
+             sc->bmp = NULL;
+        }
         av_free(sc);
         sc = NULL;
     }
@@ -2549,6 +2470,27 @@ static int subtitle_open(const char * sub_file)
     ret = avcodec_open2(dec_ctx, dec, &codec_opts);
     if (ret < 0)
         goto end;
+    if (force_style) {
+        char **list = NULL;
+        char *temp = NULL;
+        char *ptr = av_strtok(force_style, ",", &temp);
+        int i = 0;
+        while (ptr) {
+            av_dynarray_add(&list, &i, ptr);
+            if (!list) {
+                ret = AVERROR(ENOMEM);
+                goto end;
+            }
+            ptr = av_strtok(NULL, ",", &temp);
+        }
+        av_dynarray_add(&list, &i, NULL);
+        if (!list) {
+            ret = AVERROR(ENOMEM);
+            goto end;
+        }
+        ass_set_style_overrides(sc->library, list);
+        av_free(list);
+    }
 
     /* Decode subtitles and push them into the renderer (libass) */
     if (dec_ctx->subtitle_header)
@@ -2648,25 +2590,25 @@ static int subtitle_thread(void *arg)
                 if (!ass_line)
                     break;
                 /* av_log(NULL, AV_LOG_DEBUG, "got subtitle: %s\n", ass_line); */
-                for(j = 0; j < sc->sub->n_lines;j++){
-                    if((sp->sub.end_display_time-sp->sub.start_display_time == sc->sub->lines[j].duration) && strcmp((const char*)ass_line, sc->sub->lines[j].ass_line) == 0){
+                for(j = 0; j < sc->n_lines;j++){
+                    if((sp->sub.end_display_time-sp->sub.start_display_time == sc->lines[j].duration) && strcmp((const char*)ass_line, sc->lines[j].ass_line) == 0){
                         exist = 1;
                         break;
                     }
                 }
                 if(!exist){
-                    if(sc->sub->n_lines == sc->sub->max_lines){
-                        sc->sub->max_lines = sc->sub->max_lines * 2 + 1;
-                        sc->sub->lines = (SubLine*)realloc(sc->sub->lines,sizeof(SubLine)*sc->sub->max_lines);
+                    if(sc->n_lines == sc->max_lines){
+                        sc->max_lines = sc->max_lines * 2 + 1;
+                        sc->lines = (SubLine*)realloc(sc->lines,sizeof(SubLine)*sc->max_lines);
                     }
-                    line_id = sc->sub->n_lines++;
-                    memset(sc->sub->lines+line_id,0,sizeof(SubLine));
-                    sc->sub->lines[line_id].ass_line = strdup(ass_line);
-                    sc->sub->lines[line_id].duration = sp->sub.end_display_time-sp->sub.start_display_time;
+                    line_id = sc->n_lines++;
+                    memset(sc->lines+line_id,0,sizeof(SubLine));
+                    sc->lines[line_id].ass_line = strdup(ass_line);
+                    sc->lines[line_id].duration = sp->sub.end_display_time-sp->sub.start_display_time;
                     ass_process_data(sc->track, ass_line, strlen(ass_line));
-                    sc->sub->lines[line_id].start_pts = (sc->track->events[sc->track->n_events-1]).Start;
-                    sc->sub->lines[line_id].end_pts = sc->track->events[sc->track->n_events-1].Start+sc->track->events[sc->track->n_events-1].Duration;
-                    sc->sub->lines[line_id].text = strdup(sc->track->events[sc->track->n_events-1].Text);
+                    sc->lines[line_id].start_pts = (sc->track->events[sc->track->n_events-1]).Start;
+                    sc->lines[line_id].end_pts = sc->track->events[sc->track->n_events-1].Start+sc->track->events[sc->track->n_events-1].Duration;
+                    sc->lines[line_id].text = strdup(sc->track->events[sc->track->n_events-1].Text);
                 }
 
                 /* av_log(NULL, AV_LOG_DEBUG, "subtitle pts : %f\n", sp->sub.pts); */
@@ -2877,7 +2819,8 @@ static void sdl_audio_callback(void *opaque, Uint8 *stream, int len)
         len1 = is->audio_buf_size - is->audio_buf_index;
         if (len1 > len)
             len1 = len;
-        memcpy(stream, (uint8_t *)is->audio_buf + is->audio_buf_index, len1);
+        /* memcpy(stream, (uint8_t *)is->audio_buf + is->audio_buf_index, len1); */
+        SDL_MixAudio(stream, (uint8_t *)is->audio_buf + is->audio_buf_index, len1, SDL_MIX_MAXVOLUME);
         len -= len1;
         stream += len1;
         is->audio_buf_index += len1;
@@ -3121,13 +3064,6 @@ static void stream_component_close(VideoState *is, int stream_index)
         av_freep(&is->audio_buf1);
         is->audio_buf1_size = 0;
         is->audio_buf = NULL;
-
-        if (is->rdft) {
-            av_rdft_end(is->rdft);
-            av_freep(&is->rdft_data);
-            is->rdft = NULL;
-            is->rdft_bits = 0;
-        }
         break;
     case AVMEDIA_TYPE_VIDEO:
         decoder_abort(&is->viddec, &is->pictq);
@@ -3707,11 +3643,54 @@ static void seek_chapter(VideoState *is, int incr)
                                  AV_TIME_BASE_Q), 0, 0);
 }
 
+static void do_seek_stream(VideoState *s, double incr)
+{
+    double pos, frac;
+    if (seek_by_bytes) {
+        pos = -1;
+        if (pos < 0 && s->video_stream >= 0)
+            pos = frame_queue_last_pos(&s->pictq);
+        if (pos < 0 && s->audio_stream >= 0)
+            pos = frame_queue_last_pos(&s->sampq);
+        if (pos < 0)
+            pos = avio_tell(s->ic->pb);
+        if (s->ic->bit_rate)
+            incr *= s->ic->bit_rate / 8.0;
+        else
+            incr *= 180000.0;
+        pos += incr;
+        stream_seek(s, pos, incr, 1);
+    } else {
+        pos = get_master_clock(s);
+        if (isnan(pos))
+            pos = (double)s->seek_pos / AV_TIME_BASE;
+        pos += incr;
+        if (s->ic->start_time != AV_NOPTS_VALUE && pos < s->ic->start_time / (double)AV_TIME_BASE)
+            pos = s->ic->start_time / (double)AV_TIME_BASE;
+        stream_seek(s, (int64_t)(pos * AV_TIME_BASE), (int64_t)(incr * AV_TIME_BASE), 0);
+    }
+}
+
+static double get_repeat_params()
+{
+    double cur_pts = 0;
+    int i;
+    cur_pts = get_master_clock(cur_stream);
+    for(i = 0; i < sc->n_lines; i++){
+        if(cur_pts > sc->lines[i].start_pts && cur_pos < sc->sc->lines[i].end_pts){
+            repeat_pts = sc->lines[i].end_pts;
+            repeat_duration = sc->lines[i].duration;
+            break;
+        }
+    }
+    return cur_pts;
+}
+
 /* handle an event sent by the GUI */
 static void event_loop(VideoState *cur_stream)
 {
     SDL_Event event;
-    double incr, pos, frac;
+    double incr, cur_pts, frac;
 
     for (;;) {
         double x;
@@ -3735,8 +3714,10 @@ static void event_loop(VideoState *cur_stream)
             case SDLK_SPACE:
                 toggle_pause(cur_stream);
                 break;
-            case SDLK_s: // S: Step to next frame
-                step_to_next_frame(cur_stream);
+            case SDLK_s: //show subtitle or not
+                show_subtitle = show_subtitle == 1 ? 0 : 1;
+                if(cur_stream->paused)
+                    step_to_next_frame(cur_stream);
                 break;
             case SDLK_a:
                 stream_cycle_channel(cur_stream, AVMEDIA_TYPE_AUDIO);
@@ -3775,6 +3756,8 @@ static void event_loop(VideoState *cur_stream)
             case SDLK_7:
             case SDLK_8:
             case SDLK_9:
+                repeat_times = event.key.keysym.sym - SDLK_0;
+                get_repeat_params();
                 break;
             case SDLK_PAGEUP:
                 if (cur_stream->ic->nb_chapters <= 1) {
@@ -3791,10 +3774,12 @@ static void event_loop(VideoState *cur_stream)
                 seek_chapter(cur_stream, -1);
                 break;
             case SDLK_LEFT:
-                incr = -0.5;
+                cur_pos = get_repeat_params();
+                incr = -1;
                 goto do_seek;
             case SDLK_RIGHT:
-                incr = 0.5;
+                cur_pos = get_repeat_params();
+                incr = 1;
                 goto do_seek;
             case SDLK_UP:
                 incr = 60.0;
@@ -3802,29 +3787,7 @@ static void event_loop(VideoState *cur_stream)
             case SDLK_DOWN:
                 incr = -60.0;
             do_seek:
-                    if (seek_by_bytes) {
-                        pos = -1;
-                        if (pos < 0 && cur_stream->video_stream >= 0)
-                            pos = frame_queue_last_pos(&cur_stream->pictq);
-                        if (pos < 0 && cur_stream->audio_stream >= 0)
-                            pos = frame_queue_last_pos(&cur_stream->sampq);
-                        if (pos < 0)
-                            pos = avio_tell(cur_stream->ic->pb);
-                        if (cur_stream->ic->bit_rate)
-                            incr *= cur_stream->ic->bit_rate / 8.0;
-                        else
-                            incr *= 180000.0;
-                        pos += incr;
-                        stream_seek(cur_stream, pos, incr, 1);
-                    } else {
-                        pos = get_master_clock(cur_stream);
-                        if (isnan(pos))
-                            pos = (double)cur_stream->seek_pos / AV_TIME_BASE;
-                        pos += incr;
-                        if (cur_stream->ic->start_time != AV_NOPTS_VALUE && pos < cur_stream->ic->start_time / (double)AV_TIME_BASE)
-                            pos = cur_stream->ic->start_time / (double)AV_TIME_BASE;
-                        stream_seek(cur_stream, (int64_t)(pos * AV_TIME_BASE), (int64_t)(incr * AV_TIME_BASE), 0);
-                    }
+                do_seek_stream(cur_stream, incr);
                 break;
             default:
                 break;
@@ -4042,7 +4005,6 @@ static const OptionDef options[] = {
     { "vf", OPT_EXPERT | HAS_ARG, { .func_arg = opt_add_vfilter }, "set video filters", "filter_graph" },
     { "af", OPT_STRING | HAS_ARG, { &afilters }, "set audio filters", "filter_graph" },
 #endif
-    { "rdftspeed", OPT_INT | HAS_ARG| OPT_AUDIO | OPT_EXPERT, { &rdftspeed }, "rdft speed", "msecs" },
     { "showmode", HAS_ARG, { .func_arg = opt_show_mode}, "select show mode (0 = video, 1 = waves, 2 = RDFT)", "mode" },
     { "default", HAS_ARG | OPT_AUDIO | OPT_VIDEO | OPT_EXPERT, { .func_arg = opt_default }, "generic catch all option", "" },
     { "i", OPT_BOOL, { &dummy}, "read specified file", "input_file"},
@@ -4053,6 +4015,7 @@ static const OptionDef options[] = {
     { "autorotate", OPT_BOOL, { &autorotate }, "automatically rotate video", "" },
     { "sub", OPT_STRING | HAS_ARG, { &subtitle_filename }, "set external subtitle", "external subtitle" },
     { "subenc", OPT_STRING | HAS_ARG, { &subtitle_char_encoding }, "set external subtitle char encoding", "external subtitle char encoding" },
+    { "force_style", OPT_STRING | HAS_ARG, { &force_style }, "set external subtitle force style", "external subtitle force style" },
     { NULL, },
 };
 
