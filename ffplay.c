@@ -362,6 +362,7 @@ int repeat_times = 0;
 double seek_pts = 0;
 double repeat_start_pts = 0;
 double repeat_end_pts = 0;
+int stream_seeked = 0;
 static int64_t cursor_last_shown;
 static int cursor_hidden = 0;
 #if CONFIG_AVFILTER
@@ -606,6 +607,10 @@ static int decoder_decode_frame(Decoder *d, AVFrame *frame, AVSubtitle *sub) {
                         frame->pts = frame->pkt_pts;
                     } else {
                         frame->pts = frame->pkt_dts;
+                    }
+                    if(stream_seeked){
+                        stream_seeked = 0;
+                        av_log(NULL, AV_LOG_DEBUG, "\nafter seek, frame pts:%ld\n",frame->pts);
                     }
                 }
                 break;
@@ -1495,7 +1500,6 @@ static void stream_seek(VideoState *is, int64_t pos, int64_t rel, int seek_by_by
     if (!is->seek_req) {
         is->seek_pos = pos;
         is->seek_rel = rel;
-        av_log(NULL, AV_LOG_DEBUG, "seek_pos:%ld, seek relative:%ld\n", is->seek_pos, is->seek_rel);
         is->seek_flags &= ~AVSEEK_FLAG_BYTE;
         if (seek_by_bytes)
             is->seek_flags |= AVSEEK_FLAG_BYTE;
@@ -2391,6 +2395,31 @@ static int attachment_is_font(AVStream * st)
     return 0;
 }
 
+static void subtitle_process(char * ass_line)
+{
+    int line_id = 0;
+    ASS_Event *event = NULL;
+    SubLine *subLine = NULL;
+    if(sc->n_lines == sc->max_lines){
+        sc->max_lines = sc->max_lines * 2 + 1;
+        sc->lines = (SubLine*)realloc(sc->lines,sizeof(SubLine)*sc->max_lines);
+    }
+    line_id = sc->n_lines++;
+    memset(sc->lines+line_id,0,sizeof(SubLine));
+    subLine = sc->lines + line_id;
+    subLine->ass_line = strdup(ass_line);
+
+    ass_process_data(sc->track, ass_line, strlen(ass_line));
+    event = sc->track->events+(sc->track->n_events-1);
+    subLine->start_pts_ms = event->Start;
+    subLine->end_pts_ms = event->Start+event->Duration;
+    subLine->duration = event->Duration;
+    subLine->text = strdup(event->Text);
+
+    /* av_log(NULL, AV_LOG_DEBUG, "subtitle line: %s\n",ass_line); */
+    /* av_log(NULL, AV_LOG_DEBUG, "line:%d, start pts:%ld, end pts:%ld, text:%s\n\n", line_id, subLine->start_pts_ms, subLine->end_pts_ms, subLine->text); */
+}
+
 static int subtitle_open(const char * sub_file)
 {
     int j, ret, sid;
@@ -2516,9 +2545,7 @@ static int subtitle_open(const char * sub_file)
                     char *ass_line = sub.rects[i]->ass;
                     if (!ass_line)
                         break;
-                    /* av_log(NULL, AV_LOG_DEBUG, "subtitle line: %s\n",ass_line); */
-                    ass_process_data(sc->track, ass_line, strlen(ass_line));
-                    /* av_log(NULL, AV_LOG_DEBUG, "line:%d, start pts:%f, end pts:%f\n", line_id, sc->lines[line_id].start_pts_ms/1000, sc->lines[line_id].end_pts_ms/1000); */
+                    subtitle_process(ass_line);
                 }
             }
         }
@@ -2589,7 +2616,6 @@ static int subtitle_thread(void *arg)
             for (i = 0; i < sp->sub.num_rects; i++) {
                 char *ass_line = sp->sub.rects[i]->ass;
                 int exist = 0;
-                int line_id = 0;
                 if (!ass_line)
                     break;
                 /* av_log(NULL, AV_LOG_DEBUG, "got subtitle: %s\n", ass_line); */
@@ -2600,27 +2626,9 @@ static int subtitle_thread(void *arg)
                     }
                 }
                 if(!exist){
-                    ASS_Event *event = NULL;
-                    if(sc->n_lines == sc->max_lines){
-                        sc->max_lines = sc->max_lines * 2 + 1;
-                        sc->lines = (SubLine*)realloc(sc->lines,sizeof(SubLine)*sc->max_lines);
-                    }
-                    line_id = sc->n_lines++;
-                    memset(sc->lines+line_id,0,sizeof(SubLine));
-                    sc->lines[line_id].ass_line = strdup(ass_line);
-                    sc->lines[line_id].duration = sp->sub.end_display_time-sp->sub.start_display_time;
-                    ass_process_data(sc->track, ass_line, strlen(ass_line));
-                    event = sc->track->events+(sc->track->n_events-1);
-                    sc->lines[line_id].start_pts_ms = event->Start;
-                    sc->lines[line_id].end_pts_ms = event->Start+event->Duration;
-                    sc->lines[line_id].text = strdup(event->Text);
-                    av_log(NULL, AV_LOG_DEBUG, "subtitle line: %s\n",ass_line);
-                    av_log(NULL, AV_LOG_DEBUG, "line:%d, start pts:%ld, end pts:%ld, text:%s\n\n", line_id, sc->lines[line_id].start_pts_ms, sc->lines[line_id].end_pts_ms, sc->lines[line_id].text);
+                    subtitle_process(ass_line);
                 }
-
-                /* av_log(NULL, AV_LOG_DEBUG, "subtitle pts : %f\n", sp->sub.pts); */
             }
-            /* av_log(NULL,AV_LOG_DEBUG, "subtitle event number:%d\n", sc->track->n_events); */
             avsubtitle_free(&sp->sub);
         }
     }
@@ -3322,16 +3330,26 @@ static int read_thread(void *arg)
 #endif
         if (is->seek_req) {
             int64_t seek_target = is->seek_pos;
-            int64_t seek_min    = is->seek_rel > 0 ? seek_target - is->seek_rel: INT64_MIN;
-            int64_t seek_max    = is->seek_rel < 0 ? seek_target - is->seek_rel: INT64_MAX;
-// FIXME the +-2 is due to rounding being not done in the correct direction in generation
-//      of the seek_pos/seek_rel variables
+            int stream_index = -1;
+            int64_t seek_min    = is->seek_rel > 0 ? seek_target - is->seek_rel + 2: INT64_MIN;
+            int64_t seek_max    = is->seek_rel < 0 ? seek_target - is->seek_rel - 2: INT64_MAX;
+            av_log(NULL, AV_LOG_DEBUG, "\nseek_pos:%ld, seek_rel:%ld, seek_min:%ld, seek_max:%ld\n", seek_target, is->seek_rel, seek_min, seek_max);
 
-            ret = avformat_seek_file(is->ic, -1, seek_min, seek_target, seek_max, is->seek_flags);
+            stream_index = is->video_stream >= 0 ? is->video_stream : is->audio_stream;
+            if(stream_index >= 0){
+                int dir = is->seek_rel < 0 ? AVSEEK_FLAG_BACKWARD : 0;
+                AVRational time_base = is->video_stream >= 0 ? is->video_st->time_base : is->audio_st->time_base;
+                int64_t ts = av_rescale_q(seek_target, AV_TIME_BASE_Q, time_base);
+                ret = av_seek_frame(is->ic,stream_index, ts, is->seek_flags | (dir^AVSEEK_FLAG_BACKWARD));
+            }
+            else{
+                ret = avformat_seek_file(is->ic, -1, seek_min, seek_target, seek_max, is->seek_flags);
+            }
             if (ret < 0) {
                 av_log(NULL, AV_LOG_ERROR,
                        "%s: error while seeking\n", is->ic->filename);
             } else {
+                stream_seeked = 1;
                 if (is->audio_stream >= 0) {
                     packet_queue_flush(&is->audioq);
                     packet_queue_put(&is->audioq, &flush_pkt);
@@ -3693,7 +3711,7 @@ static void get_seek_params(double cur_pts, SeekType type)
             switch(type){
                 case SEEK_PREVIOUS:
                     if(i > 0){
-                        seek_pts = sc->lines[i-1].start_pts_ms / 1000;
+                        seek_pts = sc->lines[i-1].start_pts_ms / 1000.0;
                     }
                     else{
                         seek_pts = cur_pts;
@@ -3701,12 +3719,12 @@ static void get_seek_params(double cur_pts, SeekType type)
                     av_log(NULL, AV_LOG_DEBUG, "text:%s, seek pts:%lf, current pts:%lf, start pts:%ld, end pts:%ld\n", sc->lines[i].text, seek_pts, cur_pts, sc->lines[i].start_pts_ms, sc->lines[i].end_pts_ms);
                     break;
                 case REPEAT_CURRENT:
-                    repeat_start_pts = sc->lines[i].start_pts_ms / 1000;
-                    repeat_end_pts = sc->lines[i].end_pts_ms / 1000;
+                    repeat_start_pts = sc->lines[i].start_pts_ms / 1000.0;
+                    repeat_end_pts = sc->lines[i].end_pts_ms / 1000.0;
                     break;
                 case SEEK_NEXT:
                     if(i+1 < sc->n_lines){
-                        seek_pts = sc->lines[i+1].start_pts_ms / 1000;
+                        seek_pts = sc->lines[i+1].start_pts_ms / 1000.0;
                     }
                     else{
                         seek_pts = cur_pts;
@@ -3821,11 +3839,11 @@ static void event_loop(VideoState *cur_stream)
                 do_seek_stream(cur_stream, incr);
                 break;
             case SDLK_UP:
-                incr = 60.0;
+                incr = 0.3;
                 do_seek_stream(cur_stream, incr);
                 break;
             case SDLK_DOWN:
-                incr = -60.0;
+                incr = -0.3;
                 do_seek_stream(cur_stream, incr);
                 break;
             default:
