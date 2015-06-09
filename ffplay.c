@@ -137,8 +137,8 @@ typedef struct AudioParams {
 } AudioParams;
 
 typedef struct Clock {
-    double pts;           /* clock base */
-    double pts_drift;     /* clock base minus time at which we updated the clock */
+    double pts_s;           /* clock base */
+    double pts_drift_s;     /* clock base minus time at which we updated the clock */
     double last_updated;
     double speed;
     int serial;           /* clock is based on a packet with this serial */
@@ -151,7 +151,7 @@ typedef struct Frame {
     AVFrame *frame;
     AVSubtitle sub;
     int serial;
-    double pts;           /* presentation timestamp for the frame */
+    double pts_s;           /* presentation timestamp for the frame */
     double duration;      /* estimated duration of the frame */
     int64_t pos;          /* byte position of the frame in the input file */
     SDL_Overlay *bmp;
@@ -303,7 +303,7 @@ typedef struct VideoState {
     char filename[1024];
     int width, height, xleft, ytop;
     int step;
-    double pts;
+    double pts_s;
 
 #if CONFIG_AVFILTER
     int vfilter_idx;
@@ -359,7 +359,7 @@ static const char *video_codec_name;
 double audio_disp_speed = 0.02;
 int show_subtitle = 1;
 int repeat_times = 0;
-double seek_pts = 0;
+int64_t seek_pts_ms = 0;
 double repeat_start_pts = 0;
 double repeat_end_pts = 0;
 int stream_seeked = 0;
@@ -1152,13 +1152,13 @@ static void rgb2yuv(int r, int g, int b, int *y, int *u, int *v)
     *v = v0 + 128;
 }
 
-static void blend_text_subtitle(SDL_Overlay *bmp, double pts, int clear)
+static void blend_text_subtitle(SDL_Overlay *bmp, double pts_s, int clear)
 {
     int detect_change = 0;
     double time_ms = 0;
     AVPicture pict;
 
-    time_ms = pts * 1000;
+    time_ms = pts_s * 1000;
     ASS_Image *image = ass_render_frame(sc->renderer, sc->track,
                                         time_ms, &detect_change);
 
@@ -1209,7 +1209,7 @@ static void video_image_display(VideoState *is)
         if (is->subtitle_st && frame_queue_nb_remaining(&is->subpq) > 0) {
             sp = frame_queue_peek(&is->subpq);
 
-            if (vp->pts >= sp->pts + ((float) sp->sub.start_display_time / 1000)) {
+            if (vp->pts_s >= sp->pts_s + ((float) sp->sub.start_display_time / 1000)) {
                 SDL_LockYUVOverlay (vp->bmp);
 
                 pict.data[0] = vp->bmp->pixels[0];
@@ -1228,7 +1228,7 @@ static void video_image_display(VideoState *is)
             }
         }
         else if(sc){
-            blend_text_subtitle(vp->bmp, vp->pts, 0);
+            blend_text_subtitle(vp->bmp, vp->pts_s, 0);
         }
 
         /* av_log(NULL, AV_LOG_DEBUG,"is->xleft:%d, is->ytop:%d, is->width:%d, is->height:%d, vp->width:%d, vp->height:%d, vp->sar:%d",is->xleft, is->ytop, is->width, is->height, vp->width, vp->height, vp->sar); */
@@ -1402,25 +1402,25 @@ static double get_clock(Clock *c)
     if (*c->queue_serial != c->serial)
         return NAN;
     if (c->paused) {
-        return c->pts;
+        return c->pts_s;
     } else {
         double time = av_gettime_relative() / 1000000.0;
-        return c->pts_drift + time - (time - c->last_updated) * (1.0 - c->speed);
+        return c->pts_drift_s + time - (time - c->last_updated) * (1.0 - c->speed);
     }
 }
 
-static void set_clock_at(Clock *c, double pts, int serial, double time)
+static void set_clock_at(Clock *c, double pts_s, int serial, double time)
 {
-    c->pts = pts;
+    c->pts_s = pts_s;
     c->last_updated = time;
-    c->pts_drift = c->pts - time;
+    c->pts_drift_s = c->pts_s - time;
     c->serial = serial;
 }
 
-static void set_clock(Clock *c, double pts, int serial)
+static void set_clock(Clock *c, double pts_s, int serial)
 {
     double time = av_gettime_relative() / 1000000.0;
-    set_clock_at(c, pts, serial, time);
+    set_clock_at(c, pts_s, serial, time);
 }
 
 static void set_clock_speed(Clock *c, double speed)
@@ -1568,7 +1568,7 @@ static double compute_target_delay(double delay, VideoState *is)
 
 static double vp_duration(VideoState *is, Frame *vp, Frame *nextvp) {
     if (vp->serial == nextvp->serial) {
-        double duration = nextvp->pts - vp->pts;
+        double duration = nextvp->pts_s - vp->pts_s;
         if (isnan(duration) || duration <= 0 || duration > is->max_frame_duration)
             return vp->duration;
         else
@@ -1578,9 +1578,9 @@ static double vp_duration(VideoState *is, Frame *vp, Frame *nextvp) {
     }
 }
 
-static void update_video_pts(VideoState *is, double pts, int64_t pos, int serial) {
-    /* update current video pts */
-    set_clock(&is->vidclk, pts, serial);
+static void update_video_pts(VideoState *is, double pts_s, int64_t pos, int serial) {
+    /* update current video pts_s */
+    set_clock(&is->vidclk, pts_s, serial);
     sync_clock_to_slave(&is->extclk, &is->vidclk);
 }
 
@@ -1649,8 +1649,8 @@ retry:
                 is->frame_timer = time;
 
             SDL_LockMutex(is->pictq.mutex);
-            if (!redisplay && !isnan(vp->pts))
-                update_video_pts(is, vp->pts, vp->pos, vp->serial);
+            if (!redisplay && !isnan(vp->pts_s))
+                update_video_pts(is, vp->pts_s, vp->pos, vp->serial);
             SDL_UnlockMutex(is->pictq.mutex);
 
             if (frame_queue_nb_remaining(&is->pictq) > 1) {
@@ -1675,8 +1675,8 @@ retry:
                             sp2 = NULL;
 
                         if (sp->serial != is->subtitleq.serial
-                                || (is->vidclk.pts > (sp->pts + ((float) sp->sub.end_display_time / 1000)))
-                                || (sp2 && is->vidclk.pts > (sp2->pts + ((float) sp2->sub.start_display_time / 1000))))
+                                || (is->vidclk.pts_s > (sp->pts_s + ((float) sp->sub.end_display_time / 1000)))
+                                || (sp2 && is->vidclk.pts_s > (sp2->pts_s + ((float) sp2->sub.start_display_time / 1000))))
                         {
                             frame_queue_next(&is->subpq);
                         } else {
@@ -1789,13 +1789,13 @@ static void duplicate_right_border_pixels(SDL_Overlay *bmp) {
     }
 }
 
-static int queue_picture(VideoState *is, AVFrame *src_frame, double pts, double duration, int64_t pos, int serial)
+static int queue_picture(VideoState *is, AVFrame *src_frame, double pts_s, double duration, int64_t pos, int serial)
 {
     Frame *vp;
 
 #if defined(DEBUG_SYNC) && 0
     printf("frame_type=%c pts=%0.3f\n",
-           av_get_picture_type_char(src_frame->pict_type), pts);
+           av_get_picture_type_char(src_frame->pict_type), pts_s);
 #endif
 
     if (!(vp = frame_queue_peek_writable(&is->pictq)))
@@ -1873,7 +1873,7 @@ static int queue_picture(VideoState *is, AVFrame *src_frame, double pts, double 
         /* update the bitmap content */
         SDL_UnlockYUVOverlay(vp->bmp);
 
-        vp->pts = pts;
+        vp->pts_s = pts_s;
         vp->duration = duration;
         vp->pos = pos;
         vp->serial = serial;
@@ -2193,7 +2193,7 @@ static int audio_thread(void *arg)
                     goto the_end;
                 }
 
-                af->pts = (frame->pts == AV_NOPTS_VALUE) ? NAN : frame->pts * av_q2d(tb);
+                af->pts_s = (frame->pts == AV_NOPTS_VALUE) ? NAN : frame->pts * av_q2d(tb);
                 af->pos = av_frame_get_pkt_pos(frame);
                 af->serial = is->auddec.pkt_serial;
                 af->duration = av_q2d((AVRational){frame->nb_samples, frame->sample_rate});
@@ -2228,7 +2228,7 @@ static int video_thread(void *arg)
 {
     VideoState *is = arg;
     AVFrame *frame = av_frame_alloc();
-    double pts;
+    double pts_s;
     double duration;
     int ret;
     AVRational tb = is->video_st->time_base;
@@ -2309,8 +2309,8 @@ static int video_thread(void *arg)
             tb = filt_out->inputs[0]->time_base;
 #endif
             duration = (frame_rate.num && frame_rate.den ? av_q2d((AVRational){frame_rate.den, frame_rate.num}) : 0);
-            pts = (frame->pts == AV_NOPTS_VALUE) ? NAN : frame->pts * av_q2d(tb);
-            ret = queue_picture(is, frame, pts, duration, av_frame_get_pkt_pos(frame), is->viddec.pkt_serial);
+            pts_s = (frame->pts == AV_NOPTS_VALUE) ? NAN : frame->pts * av_q2d(tb);
+            ret = queue_picture(is, frame, pts_s, duration, av_frame_get_pkt_pos(frame), is->viddec.pkt_serial);
             av_frame_unref(frame);
 #if CONFIG_AVFILTER
         }
@@ -2569,7 +2569,7 @@ static int subtitle_thread(void *arg)
     VideoState *is = arg;
     Frame *sp;
     int got_subtitle;
-    double pts;
+    double pts_s;
     int ret;
     int i, j;
     int r, g, b, y, u, v, a;
@@ -2590,12 +2590,12 @@ static int subtitle_thread(void *arg)
         if ((got_subtitle = decoder_decode_frame(&is->subdec, NULL, &sp->sub)) < 0)
             break;
 
-        pts = 0;
+        pts_s = 0;
 
         if (got_subtitle && sp->sub.format == 0) {
             if (sp->sub.pts != AV_NOPTS_VALUE)
-                pts = sp->sub.pts / (double)AV_TIME_BASE;
-            sp->pts = pts;
+                pts_s = sp->sub.pts / (double)AV_TIME_BASE;
+            sp->pts_s = pts_s;
             sp->serial = is->subdec.pkt_serial;
 
             for (i = 0; i < sp->sub.num_rects; i++)
@@ -2792,8 +2792,8 @@ static int audio_decode_frame(VideoState *is)
 
     audio_clock0 = is->audio_clock;
     /* update the audio clock with the pts */
-    if (!isnan(af->pts))
-        is->audio_clock = af->pts + (double) af->frame->nb_samples / af->frame->sample_rate;
+    if (!isnan(af->pts_s))
+        is->audio_clock = af->pts_s + (double) af->frame->nb_samples / af->frame->sample_rate;
     else
         is->audio_clock = NAN;
     is->audio_clock_serial = af->serial;
@@ -3340,7 +3340,7 @@ static int read_thread(void *arg)
                 int dir = is->seek_rel < 0 ? AVSEEK_FLAG_BACKWARD : 0;
                 AVRational time_base = is->video_stream >= 0 ? is->video_st->time_base : is->audio_st->time_base;
                 int64_t ts = av_rescale_q(seek_target, AV_TIME_BASE_Q, time_base);
-                ret = av_seek_frame(is->ic,stream_index, ts, is->seek_flags | (dir^AVSEEK_FLAG_BACKWARD));
+                ret = av_seek_frame(is->ic,stream_index, ts, is->seek_flags | dir);
             }
             else{
                 ret = avformat_seek_file(is->ic, -1, seek_min, seek_target, seek_max, is->seek_flags);
@@ -3668,7 +3668,7 @@ static void seek_chapter(VideoState *is, int incr)
                                  AV_TIME_BASE_Q), 0, 0);
 }
 
-static void do_seek_stream(VideoState *s, double incr)
+static void stream_seek_increment(VideoState *s, double incr)
 {
     double pos, frac;
     if (seek_by_bytes) {
@@ -3702,6 +3702,43 @@ typedef enum {
     SEEK_NEXT
 }SeekType;
 
+static void stream_seek_by_sub(VideoState *s, SeekType type)
+{
+    int a, b, m;
+    int64_t cur_ts = get_master_clock(s) * 1000;
+    int inside = 0;
+    SubLine *lines = sc->lines;
+    a = 0;
+    m = -1;
+    b = sc->n_lines -1;
+    if(b && lines[b].start_pts_ms < cur_ts)
+        a = b;
+    while(b - a > 1){
+        m = (a + b) >> 1;
+        if(cur_ts <= lines[m].start_pts_ms)
+            b = m;
+        else if(cur_ts >= lines[m].end_pts_ms)
+            a = m;
+        else if(cur_ts > lines[m].start_pts_ms && cur_ts < lines[m].end_pts_ms){
+            inside = 1;
+            break;
+        }
+    }
+    if(type == SEEK_PREVIOUS)
+        m = a;
+    else if(type == REPEAT_CURRENT && !inside)
+        m = -1;
+    else if(type == SEEK_NEXT && a != b)
+        m = b;
+    else
+        m = -1;
+
+    if(m >= 0){
+        stream_seek(s, (int64_t)(lines[m].start_pts_ms * AV_TIME_BASE / 1000), (int64_t)((lines[m].start_pts_ms - cur_ts) * AV_TIME_BASE / 1000), 0);
+        av_log(NULL, AV_LOG_DEBUG, "text:%s, seek pts:%ld, current pts:%ld, end pts:%ld\n", lines[m].text, lines[m].start_pts_ms, cur_ts, lines[m].end_pts_ms);
+    }
+}
+
 static void get_seek_params(double cur_pts, SeekType type)
 {
     int i;
@@ -3711,12 +3748,12 @@ static void get_seek_params(double cur_pts, SeekType type)
             switch(type){
                 case SEEK_PREVIOUS:
                     if(i > 0){
-                        seek_pts = sc->lines[i-1].start_pts_ms / 1000.0;
+                        seek_pts_ms = sc->lines[i-1].start_pts_ms / 1000.0;
                     }
                     else{
-                        seek_pts = cur_pts;
+                        seek_pts_ms = cur_pts;
                     }
-                    av_log(NULL, AV_LOG_DEBUG, "text:%s, seek pts:%lf, current pts:%lf, start pts:%ld, end pts:%ld\n", sc->lines[i].text, seek_pts, cur_pts, sc->lines[i].start_pts_ms, sc->lines[i].end_pts_ms);
+                    av_log(NULL, AV_LOG_DEBUG, "text:%s, seek pts:%lf, current pts:%lf, start pts:%ld, end pts:%ld\n", sc->lines[i].text, seek_pts_ms, cur_pts, sc->lines[i].start_pts_ms, sc->lines[i].end_pts_ms);
                     break;
                 case REPEAT_CURRENT:
                     repeat_start_pts = sc->lines[i].start_pts_ms / 1000.0;
@@ -3724,14 +3761,14 @@ static void get_seek_params(double cur_pts, SeekType type)
                     break;
                 case SEEK_NEXT:
                     if(i+1 < sc->n_lines){
-                        seek_pts = sc->lines[i+1].start_pts_ms / 1000.0;
+                        seek_pts_ms = sc->lines[i+1].start_pts_ms / 1000.0;
                     }
                     else{
-                        seek_pts = cur_pts;
+                        seek_pts_ms = cur_pts;
                     }
                     break;
                 default:
-                    seek_pts = cur_pts;
+                    seek_pts_ms = cur_pts;
                     break;
             }
             break;
@@ -3810,41 +3847,34 @@ static void event_loop(VideoState *cur_stream)
             case SDLK_8:
             case SDLK_9:
                 repeat_times = event.key.keysym.sym - SDLK_0;
-                cur_pts = get_master_clock(cur_stream);
-                get_seek_params(cur_pts, REPEAT_CURRENT);
                 break;
             case SDLK_PAGEUP:
                 if (cur_stream->ic->nb_chapters <= 1) {
-                    incr = 600.0;
-                    do_seek_stream(cur_stream, incr);
+                    incr = 20.0;
+                    stream_seek_increment(cur_stream, incr);
                 }
                 seek_chapter(cur_stream, 1);
                 break;
             case SDLK_PAGEDOWN:
                 if (cur_stream->ic->nb_chapters <= 1) {
-                    incr = -600.0;
-                    do_seek_stream(cur_stream, incr);
+                    incr = -20.0;
+                    stream_seek_increment(cur_stream, incr);
                 }
                 seek_chapter(cur_stream, -1);
                 break;
             case SDLK_LEFT:
-                cur_pts = get_master_clock(cur_stream);
-                get_seek_params(cur_pts, SEEK_PREVIOUS);
-                incr = seek_pts - cur_pts;
-                do_seek_stream(cur_stream, incr);
+                stream_seek_by_sub(cur_stream, SEEK_PREVIOUS);
+                break;
             case SDLK_RIGHT:
-                cur_pts = get_master_clock(cur_stream);
-                get_seek_params(cur_pts, SEEK_NEXT);
-                incr = seek_pts - cur_pts;
-                do_seek_stream(cur_stream, incr);
+                stream_seek_by_sub(cur_stream, SEEK_NEXT);
                 break;
             case SDLK_UP:
                 incr = 0.3;
-                do_seek_stream(cur_stream, incr);
+                stream_seek_increment(cur_stream, incr);
                 break;
             case SDLK_DOWN:
                 incr = -0.3;
-                do_seek_stream(cur_stream, incr);
+                stream_seek_increment(cur_stream, incr);
                 break;
             default:
                 break;
