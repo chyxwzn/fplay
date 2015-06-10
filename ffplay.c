@@ -274,6 +274,9 @@ typedef struct VideoState {
     struct SwrContext *swr_ctx;
     int frame_drops_early;
     int frame_drops_late;
+    int stream_seeking;
+    int video_seek_synced;
+    int audio_seek_synced;
 
     enum ShowMode {
         SHOW_MODE_NONE = -1, SHOW_MODE_VIDEO = 0, SHOW_MODE_WAVES, SHOW_MODE_RDFT, SHOW_MODE_NB
@@ -362,7 +365,6 @@ int repeat_times = 0;
 int64_t seek_pts_ms = 0;
 double repeat_start_pts = 0;
 double repeat_end_pts = 0;
-int stream_seeked = 0;
 static int64_t cursor_last_shown;
 static int cursor_hidden = 0;
 #if CONFIG_AVFILTER
@@ -569,7 +571,7 @@ static void decoder_init(Decoder *d, AVCodecContext *avctx, PacketQueue *queue, 
     d->start_pts = AV_NOPTS_VALUE;
 }
 
-static int decoder_decode_frame(Decoder *d, AVFrame *frame, AVSubtitle *sub) {
+static int decoder_decode_frame(VideoState *is, Decoder *d, AVFrame *frame, AVSubtitle *sub) {
     int got_frame = 0;
 
     do {
@@ -586,6 +588,7 @@ static int decoder_decode_frame(Decoder *d, AVFrame *frame, AVSubtitle *sub) {
                 if (packet_queue_get(d->queue, &pkt, 1, &d->pkt_serial) < 0)
                     return -1;
                 if (pkt.data == flush_pkt.data) {
+                    av_log(NULL, AV_LOG_DEBUG, "flush buffers\n");
                     avcodec_flush_buffers(d->avctx);
                     d->finished = 0;
                     d->next_pts = d->start_pts;
@@ -608,9 +611,16 @@ static int decoder_decode_frame(Decoder *d, AVFrame *frame, AVSubtitle *sub) {
                     } else {
                         frame->pts = frame->pkt_dts;
                     }
-                    if(stream_seeked){
-                        stream_seeked = 0;
-                        av_log(NULL, AV_LOG_DEBUG, "\nafter seek, frame pts:%ld\n",frame->pts);
+                    if(is->stream_seeking && !is->video_seek_synced){
+                        AVRational tb = is->video_st->time_base;
+                        int64_t pts_tb = frame->pts * av_q2d(tb) * AV_TIME_BASE;
+                        if(pts_tb < is->seek_pos){
+                            av_frame_unref(frame);
+                        }
+                        else{
+                            is->video_seek_synced = 1;
+                        }
+                        av_log(NULL, AV_LOG_DEBUG, "\nafter seek, video frame pts:%ld\n",pts_tb);
                     }
                 }
                 break;
@@ -628,6 +638,17 @@ static int decoder_decode_frame(Decoder *d, AVFrame *frame, AVSubtitle *sub) {
                         d->next_pts = frame->pts + frame->nb_samples;
                         d->next_pts_tb = tb;
                     }
+                    if(is->stream_seeking && !is->audio_seek_synced){
+                        AVRational tb = is->audio_st->time_base;
+                        int64_t pts_tb = frame->pts * av_q2d(tb) * AV_TIME_BASE;
+                        if(pts_tb < is->seek_pos){
+                            av_frame_unref(frame);
+                        }
+                        else{
+                            is->audio_seek_synced = 1;
+                        }
+                        av_log(NULL, AV_LOG_DEBUG, "\nafter seek, audio frame pts:%ld\n",pts_tb);
+                    }
                 }
                 break;
             case AVMEDIA_TYPE_SUBTITLE:
@@ -635,6 +656,8 @@ static int decoder_decode_frame(Decoder *d, AVFrame *frame, AVSubtitle *sub) {
                 break;
         }
 
+        if(is->video_seek_synced && is->audio_seek_synced)
+            is->stream_seeking = 0;
         if (ret < 0) {
             d->packet_pending = 0;
         } else {
@@ -654,6 +677,8 @@ static int decoder_decode_frame(Decoder *d, AVFrame *frame, AVSubtitle *sub) {
                 }
             }
         }
+        if(is->stream_seeking)
+            got_frame = 0;
     } while (!got_frame && !d->finished);
 
     return got_frame;
@@ -1592,8 +1617,9 @@ static void video_refresh(void *opaque, double *remaining_time)
 
     Frame *sp, *sp2;
 
-    if (!is->paused && get_master_sync_type(is) == AV_SYNC_EXTERNAL_CLOCK && is->realtime)
+    if (!is->paused && get_master_sync_type(is) == AV_SYNC_EXTERNAL_CLOCK && is->realtime){
         check_external_clock_speed(is);
+    }
 
     if (!display_disable && is->show_mode != SHOW_MODE_VIDEO && is->audio_st) {
         time = av_gettime_relative() / 1000000.0;
@@ -1610,6 +1636,7 @@ static void video_refresh(void *opaque, double *remaining_time)
             redisplay = frame_queue_prev(&is->pictq);
 retry:
         if (frame_queue_nb_remaining(&is->pictq) == 0) {
+            av_log(NULL, AV_LOG_DEBUG, "log1\n");
             // nothing to do, no picture to display in the queue
         } else {
             double last_duration, duration, delay;
@@ -1620,13 +1647,16 @@ retry:
             vp = frame_queue_peek(&is->pictq);
 
             if (vp->serial != is->videoq.serial) {
+                av_log(NULL, AV_LOG_DEBUG, "log2\n");
                 frame_queue_next(&is->pictq);
                 redisplay = 0;
                 goto retry;
             }
 
-            if (lastvp->serial != vp->serial && !redisplay)
+            if (lastvp->serial != vp->serial && !redisplay){
+                av_log(NULL, AV_LOG_DEBUG, "log3\n");
                 is->frame_timer = av_gettime_relative() / 1000000.0;
+            }
 
             if (is->paused)
                 goto display;
@@ -1640,26 +1670,33 @@ retry:
 
             time= av_gettime_relative()/1000000.0;
             if (time < is->frame_timer + delay && !redisplay) {
+                av_log(NULL, AV_LOG_DEBUG, "log4\n");
                 *remaining_time = FFMIN(is->frame_timer + delay - time, *remaining_time);
                 return;
             }
 
             is->frame_timer += delay;
-            if (delay > 0 && time - is->frame_timer > AV_SYNC_THRESHOLD_MAX)
+            if (delay > 0 && time - is->frame_timer > AV_SYNC_THRESHOLD_MAX){
+                av_log(NULL, AV_LOG_DEBUG, "log5\n");
                 is->frame_timer = time;
+            }
 
             SDL_LockMutex(is->pictq.mutex);
-            if (!redisplay && !isnan(vp->pts_s))
+            if (!redisplay && !isnan(vp->pts_s)){
+                av_log(NULL, AV_LOG_DEBUG, "log6, pts:%lf\n", vp->pts_s);
                 update_video_pts(is, vp->pts_s, vp->pos, vp->serial);
+            }
             SDL_UnlockMutex(is->pictq.mutex);
 
             if (frame_queue_nb_remaining(&is->pictq) > 1) {
                 Frame *nextvp = frame_queue_peek_next(&is->pictq);
                 duration = vp_duration(is, vp, nextvp);
+                av_log(NULL, AV_LOG_DEBUG, "log6\n");
                 if(!is->step && (redisplay || framedrop>0 || (framedrop && get_master_sync_type(is) != AV_SYNC_VIDEO_MASTER)) && time > is->frame_timer + duration){
                     if (!redisplay)
                         is->frame_drops_late++;
                     frame_queue_next(&is->pictq);
+                    av_log(NULL, AV_LOG_DEBUG, "log7\n");
                     redisplay = 0;
                     goto retry;
                 }
@@ -1888,7 +1925,7 @@ static int get_video_frame(VideoState *is, AVFrame *frame)
 {
     int got_picture;
 
-    if ((got_picture = decoder_decode_frame(&is->viddec, frame, NULL)) < 0)
+    if ((got_picture = decoder_decode_frame(is, &is->viddec, frame, NULL)) < 0)
         return -1;
 
     if (got_picture) {
@@ -2145,7 +2182,7 @@ static int audio_thread(void *arg)
         return AVERROR(ENOMEM);
 
     do {
-        if ((got_frame = decoder_decode_frame(&is->auddec, frame, NULL)) < 0){
+        if ((got_frame = decoder_decode_frame(is, &is->auddec, frame, NULL)) < 0){
             goto the_end;
         }
 
@@ -2587,7 +2624,7 @@ static int subtitle_thread(void *arg)
         if (!(sp = frame_queue_peek_writable(&is->subpq)))
             return 0;
 
-        if ((got_subtitle = decoder_decode_frame(&is->subdec, NULL, &sp->sub)) < 0)
+        if ((got_subtitle = decoder_decode_frame(is, &is->subdec, NULL, &sp->sub)) < 0)
             break;
 
         pts_s = 0;
@@ -3349,7 +3386,11 @@ static int read_thread(void *arg)
                 av_log(NULL, AV_LOG_ERROR,
                        "%s: error while seeking\n", is->ic->filename);
             } else {
-                stream_seeked = 1;
+                if(is->seek_rel != 0){
+                    is->stream_seeking = 1;
+                    is->video_seek_synced = 0;
+                    is->audio_seek_synced = 0;
+                }
                 if (is->audio_stream >= 0) {
                     packet_queue_flush(&is->audioq);
                     packet_queue_put(&is->audioq, &flush_pkt);
@@ -3715,6 +3756,7 @@ static void stream_seek_by_sub(VideoState *s, SeekType type)
         a = b;
     while(b - a > 1){
         m = (a + b) >> 1;
+        /* av_log(NULL, AV_LOG_DEBUG, "a=%d, b=%d, m=%d\n", a,b,m); */
         if(cur_ts <= lines[m].start_pts_ms)
             b = m;
         else if(cur_ts >= lines[m].end_pts_ms)
@@ -3724,55 +3766,26 @@ static void stream_seek_by_sub(VideoState *s, SeekType type)
             break;
         }
     }
-    if(type == SEEK_PREVIOUS)
-        m = a;
+    if(type == SEEK_PREVIOUS){
+        if(inside)
+            m = m-1;
+        else
+            m = a;
+    }
     else if(type == REPEAT_CURRENT && !inside)
         m = -1;
-    else if(type == SEEK_NEXT && a != b)
-        m = b;
+    else if(type == SEEK_NEXT && a != b){
+        if(inside)
+            m = m+1;
+        else
+            m = b;
+    }
     else
         m = -1;
 
     if(m >= 0){
         stream_seek(s, (int64_t)(lines[m].start_pts_ms * AV_TIME_BASE / 1000), (int64_t)((lines[m].start_pts_ms - cur_ts) * AV_TIME_BASE / 1000), 0);
         av_log(NULL, AV_LOG_DEBUG, "text:%s, seek pts:%ld, current pts:%ld, end pts:%ld\n", lines[m].text, lines[m].start_pts_ms, cur_ts, lines[m].end_pts_ms);
-    }
-}
-
-static void get_seek_params(double cur_pts, SeekType type)
-{
-    int i;
-    int64_t cur_pts_ms = (int64_t)cur_pts * 1000;
-    for(i = 0; i < sc->n_lines; i++){
-        if(cur_pts_ms > sc->lines[i].start_pts_ms && cur_pts_ms < sc->lines[i].end_pts_ms){
-            switch(type){
-                case SEEK_PREVIOUS:
-                    if(i > 0){
-                        seek_pts_ms = sc->lines[i-1].start_pts_ms / 1000.0;
-                    }
-                    else{
-                        seek_pts_ms = cur_pts;
-                    }
-                    av_log(NULL, AV_LOG_DEBUG, "text:%s, seek pts:%lf, current pts:%lf, start pts:%ld, end pts:%ld\n", sc->lines[i].text, seek_pts_ms, cur_pts, sc->lines[i].start_pts_ms, sc->lines[i].end_pts_ms);
-                    break;
-                case REPEAT_CURRENT:
-                    repeat_start_pts = sc->lines[i].start_pts_ms / 1000.0;
-                    repeat_end_pts = sc->lines[i].end_pts_ms / 1000.0;
-                    break;
-                case SEEK_NEXT:
-                    if(i+1 < sc->n_lines){
-                        seek_pts_ms = sc->lines[i+1].start_pts_ms / 1000.0;
-                    }
-                    else{
-                        seek_pts_ms = cur_pts;
-                    }
-                    break;
-                default:
-                    seek_pts_ms = cur_pts;
-                    break;
-            }
-            break;
-        }
     }
 }
 
