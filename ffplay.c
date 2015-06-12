@@ -604,6 +604,7 @@ static int decoder_decode_frame(VideoState *is, Decoder *d, AVFrame *frame, AVSu
             case AVMEDIA_TYPE_VIDEO:
                 ret = avcodec_decode_video2(d->avctx, frame, &got_frame, &d->pkt_temp);
                 if (got_frame) {
+                    av_log(NULL, AV_LOG_DEBUG, "decode a video frame\n");
                     if (decoder_reorder_pts == -1) {
                         frame->pts = av_frame_get_best_effort_timestamp(frame);
                     } else if (decoder_reorder_pts) {
@@ -628,18 +629,21 @@ static int decoder_decode_frame(VideoState *is, Decoder *d, AVFrame *frame, AVSu
                 ret = avcodec_decode_audio4(d->avctx, frame, &got_frame, &d->pkt_temp);
                 if (got_frame) {
                     AVRational tb = (AVRational){1, frame->sample_rate};
-                    if (frame->pts != AV_NOPTS_VALUE)
+                    av_log(NULL, AV_LOG_DEBUG, "decode an audio frame\n");
+                    if (frame->pts != AV_NOPTS_VALUE){
                         frame->pts = av_rescale_q(frame->pts, d->avctx->time_base, tb);
-                    else if (frame->pkt_pts != AV_NOPTS_VALUE)
+                    }
+                    else if (frame->pkt_pts != AV_NOPTS_VALUE){
                         frame->pts = av_rescale_q(frame->pkt_pts, av_codec_get_pkt_timebase(d->avctx), tb);
-                    else if (d->next_pts != AV_NOPTS_VALUE)
+                    }
+                    else if (d->next_pts != AV_NOPTS_VALUE){
                         frame->pts = av_rescale_q(d->next_pts, d->next_pts_tb, tb);
+                    }
                     if (frame->pts != AV_NOPTS_VALUE) {
                         d->next_pts = frame->pts + frame->nb_samples;
                         d->next_pts_tb = tb;
                     }
                     if(is->stream_seeking && !is->audio_seek_synced){
-                        AVRational tb = is->audio_st->time_base;
                         int64_t pts_tb = frame->pts * av_q2d(tb) * AV_TIME_BASE;
                         if(pts_tb < is->seek_pos){
                             av_frame_unref(frame);
@@ -677,7 +681,7 @@ static int decoder_decode_frame(VideoState *is, Decoder *d, AVFrame *frame, AVSu
                 }
             }
         }
-        if(is->stream_seeking)
+        if(is->stream_seeking && ((d->avctx->codec_type == AVMEDIA_TYPE_VIDEO && is->video_seek_synced != 1) || (d->avctx->codec_type == AVMEDIA_TYPE_AUDIO && is->audio_seek_synced != 1)))
             got_frame = 0;
     } while (!got_frame && !d->finished);
 
@@ -1585,7 +1589,7 @@ static double compute_target_delay(double delay, VideoState *is)
         }
     }
 
-    av_dlog(NULL, "video: delay=%0.3f A-V=%f\n",
+    av_log(NULL, AV_LOG_DEBUG, "video: delay=%0.3f A-V=%f\n",
             delay, -diff);
 
     return delay;
@@ -1665,12 +1669,13 @@ retry:
             last_duration = vp_duration(is, lastvp, vp);
             if (redisplay)
                 delay = 0.0;
-            else
+            else{
                 delay = compute_target_delay(last_duration, is);
+            }
 
             time= av_gettime_relative()/1000000.0;
             if (time < is->frame_timer + delay && !redisplay) {
-                av_log(NULL, AV_LOG_DEBUG, "log4\n");
+                av_log(NULL, AV_LOG_DEBUG, "log4, time:%lf, frame_timer:%lf\n",time,is->frame_timer);
                 *remaining_time = FFMIN(is->frame_timer + delay - time, *remaining_time);
                 return;
             }
@@ -1691,12 +1696,12 @@ retry:
             if (frame_queue_nb_remaining(&is->pictq) > 1) {
                 Frame *nextvp = frame_queue_peek_next(&is->pictq);
                 duration = vp_duration(is, vp, nextvp);
-                av_log(NULL, AV_LOG_DEBUG, "log6\n");
+                av_log(NULL, AV_LOG_DEBUG, "log7\n");
                 if(!is->step && (redisplay || framedrop>0 || (framedrop && get_master_sync_type(is) != AV_SYNC_VIDEO_MASTER)) && time > is->frame_timer + duration){
                     if (!redisplay)
                         is->frame_drops_late++;
                     frame_queue_next(&is->pictq);
-                    av_log(NULL, AV_LOG_DEBUG, "log7\n");
+                    av_log(NULL, AV_LOG_DEBUG, "log8\n");
                     redisplay = 0;
                     goto retry;
                 }
@@ -2880,6 +2885,7 @@ static void sdl_audio_callback(void *opaque, Uint8 *stream, int len)
     is->audio_write_buf_size = is->audio_buf_size - is->audio_buf_index;
     /* Let's assume the audio driver that is used by SDL has two periods. */
     if (!isnan(is->audio_clock)) {
+        av_log(NULL, AV_LOG_DEBUG, "sync audio clock:%lf\n", is->audio_clock - (double)(2 * is->audio_hw_buf_size + is->audio_write_buf_size) / is->audio_tgt.bytes_per_sec);
         set_clock_at(&is->audclk, is->audio_clock - (double)(2 * is->audio_hw_buf_size + is->audio_write_buf_size) / is->audio_tgt.bytes_per_sec, is->audio_clock_serial, audio_callback_time / 1000000.0);
         sync_clock_to_slave(&is->extclk, &is->audclk);
     }
@@ -3372,16 +3378,16 @@ static int read_thread(void *arg)
             int64_t seek_max    = is->seek_rel < 0 ? seek_target - is->seek_rel - 2: INT64_MAX;
             av_log(NULL, AV_LOG_DEBUG, "\nseek_pos:%ld, seek_rel:%ld, seek_min:%ld, seek_max:%ld\n", seek_target, is->seek_rel, seek_min, seek_max);
 
-            stream_index = is->video_stream >= 0 ? is->video_stream : is->audio_stream;
-            if(stream_index >= 0){
-                int dir = is->seek_rel < 0 ? AVSEEK_FLAG_BACKWARD : 0;
-                AVRational time_base = is->video_stream >= 0 ? is->video_st->time_base : is->audio_st->time_base;
-                int64_t ts = av_rescale_q(seek_target, AV_TIME_BASE_Q, time_base);
-                ret = av_seek_frame(is->ic,stream_index, ts, is->seek_flags | dir);
-            }
-            else{
+            /* stream_index = is->video_stream >= 0 ? is->video_stream : is->audio_stream; */
+            /* if(stream_index >= 0){ */
+            /*     int dir = is->seek_rel < 0 ? AVSEEK_FLAG_BACKWARD : 0; */
+            /*     AVRational time_base = is->video_stream >= 0 ? is->video_st->time_base : is->audio_st->time_base; */
+            /*     int64_t ts = av_rescale_q(seek_target, AV_TIME_BASE_Q, time_base); */
+            /*     ret = av_seek_frame(is->ic,stream_index, ts, is->seek_flags | dir); */
+            /* } */
+            /* else{ */
                 ret = avformat_seek_file(is->ic, -1, seek_min, seek_target, seek_max, is->seek_flags);
-            }
+            /* } */
             if (ret < 0) {
                 av_log(NULL, AV_LOG_ERROR,
                        "%s: error while seeking\n", is->ic->filename);
@@ -3673,8 +3679,10 @@ static void refresh_loop_wait_event(VideoState *is, SDL_Event *event) {
             SDL_ShowCursor(0);
             cursor_hidden = 1;
         }
-        if (remaining_time > 0.0)
+        if (remaining_time > 0.0){
+            av_log(NULL,AV_LOG_DEBUG, "sleep time:%lf\n",remaining_time);
             av_usleep((int64_t)(remaining_time * 1000000.0));
+        }
         remaining_time = REFRESH_RATE;
         if (is->show_mode != SHOW_MODE_NONE && (!is->paused || is->force_refresh))
             video_refresh(is, &remaining_time);
