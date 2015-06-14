@@ -320,6 +320,7 @@ typedef struct VideoState {
     int last_video_stream, last_audio_stream, last_subtitle_stream;
 
     SDL_cond *continue_read_thread;
+    SDL_cond *stream_seek_finish;
 } VideoState;
 
 /* options specified by the user */
@@ -583,10 +584,15 @@ static int decoder_decode_frame(VideoState *is, Decoder *d, AVFrame *frame, AVSu
         if (!d->packet_pending || d->queue->serial != d->pkt_serial) {
             AVPacket pkt;
             do {
-                if (d->queue->nb_packets == 0)
+                if (d->queue->nb_packets == 0){
+                    av_log(NULL, AV_LOG_DEBUG, "there is no packet in buffer\n");
                     SDL_CondSignal(d->empty_queue_cond);
-                if (packet_queue_get(d->queue, &pkt, 1, &d->pkt_serial) < 0)
+                    if(is->stream_seeking)
+                        av_usleep(2000);
+                }
+                if (packet_queue_get(d->queue, &pkt, 1, &d->pkt_serial) < 0){
                     return -1;
+                }
                 if (pkt.data == flush_pkt.data) {
                     av_log(NULL, AV_LOG_DEBUG, "flush buffers\n");
                     avcodec_flush_buffers(d->avctx);
@@ -604,7 +610,7 @@ static int decoder_decode_frame(VideoState *is, Decoder *d, AVFrame *frame, AVSu
             case AVMEDIA_TYPE_VIDEO:
                 ret = avcodec_decode_video2(d->avctx, frame, &got_frame, &d->pkt_temp);
                 if (got_frame) {
-                    av_log(NULL, AV_LOG_DEBUG, "decode a video frame\n");
+                    /* av_log(NULL, AV_LOG_DEBUG, "decode a video frame\n"); */
                     if (decoder_reorder_pts == -1) {
                         frame->pts = av_frame_get_best_effort_timestamp(frame);
                     } else if (decoder_reorder_pts) {
@@ -629,7 +635,7 @@ static int decoder_decode_frame(VideoState *is, Decoder *d, AVFrame *frame, AVSu
                 ret = avcodec_decode_audio4(d->avctx, frame, &got_frame, &d->pkt_temp);
                 if (got_frame) {
                     AVRational tb = (AVRational){1, frame->sample_rate};
-                    av_log(NULL, AV_LOG_DEBUG, "decode an audio frame\n");
+                    /* av_log(NULL, AV_LOG_DEBUG, "decode an audio frame\n"); */
                     if (frame->pts != AV_NOPTS_VALUE){
                         frame->pts = av_rescale_q(frame->pts, d->avctx->time_base, tb);
                     }
@@ -660,8 +666,11 @@ static int decoder_decode_frame(VideoState *is, Decoder *d, AVFrame *frame, AVSu
                 break;
         }
 
-        if(is->video_seek_synced && is->audio_seek_synced)
+        if(is->video_seek_synced && is->audio_seek_synced){
             is->stream_seeking = 0;
+            is->video_seek_synced = 0;
+            SDL_CondSignal(is->stream_seek_finish);
+        }
         if (ret < 0) {
             d->packet_pending = 0;
         } else {
@@ -681,7 +690,7 @@ static int decoder_decode_frame(VideoState *is, Decoder *d, AVFrame *frame, AVSu
                 }
             }
         }
-        if(is->stream_seeking && ((d->avctx->codec_type == AVMEDIA_TYPE_VIDEO && is->video_seek_synced != 1) || (d->avctx->codec_type == AVMEDIA_TYPE_AUDIO && is->audio_seek_synced != 1)))
+        if(is->stream_seeking && ((d->avctx->codec_type == AVMEDIA_TYPE_VIDEO && !is->video_seek_synced) || (d->avctx->codec_type == AVMEDIA_TYPE_AUDIO && !is->audio_seek_synced)))
             got_frame = 0;
     } while (!got_frame && !d->finished);
 
@@ -766,13 +775,20 @@ static Frame *frame_queue_peek_writable(FrameQueue *f)
     return &f->queue[f->windex];
 }
 
-static Frame *frame_queue_peek_readable(FrameQueue *f)
+static Frame *frame_queue_peek_readable(FrameQueue *f, int timeout_ms)
 {
     /* wait until we have a readable a new frame */
+    int ret = 0;
     SDL_LockMutex(f->mutex);
     while (f->size - f->rindex_shown <= 0 &&
            !f->pktq->abort_request) {
-        SDL_CondWait(f->cond, f->mutex);
+        if(timeout_ms > 0)
+            ret = SDL_CondWaitTimeout(f->cond, f->mutex, timeout_ms);
+        else
+            SDL_CondWait(f->cond, f->mutex);
+
+        if(ret == SDL_MUTEX_TIMEDOUT)
+            return NULL;
     }
     SDL_UnlockMutex(f->mutex);
 
@@ -1589,8 +1605,7 @@ static double compute_target_delay(double delay, VideoState *is)
         }
     }
 
-    av_log(NULL, AV_LOG_DEBUG, "video: delay=%0.3f A-V=%f\n",
-            delay, -diff);
+    /* av_log(NULL, AV_LOG_DEBUG, "video: delay=%0.3f A-V=%f\n", delay, -diff); */
 
     return delay;
 }
@@ -1640,7 +1655,8 @@ static void video_refresh(void *opaque, double *remaining_time)
             redisplay = frame_queue_prev(&is->pictq);
 retry:
         if (frame_queue_nb_remaining(&is->pictq) == 0) {
-            av_log(NULL, AV_LOG_DEBUG, "log1\n");
+            if(is->stream_seeking)
+                av_log(NULL, AV_LOG_DEBUG, "no picture to display\n");
             // nothing to do, no picture to display in the queue
         } else {
             double last_duration, duration, delay;
@@ -1651,14 +1667,12 @@ retry:
             vp = frame_queue_peek(&is->pictq);
 
             if (vp->serial != is->videoq.serial) {
-                av_log(NULL, AV_LOG_DEBUG, "log2\n");
                 frame_queue_next(&is->pictq);
                 redisplay = 0;
                 goto retry;
             }
 
             if (lastvp->serial != vp->serial && !redisplay){
-                av_log(NULL, AV_LOG_DEBUG, "log3\n");
                 is->frame_timer = av_gettime_relative() / 1000000.0;
             }
 
@@ -1675,20 +1689,19 @@ retry:
 
             time= av_gettime_relative()/1000000.0;
             if (time < is->frame_timer + delay && !redisplay) {
-                av_log(NULL, AV_LOG_DEBUG, "log4, time:%lf, frame_timer:%lf\n",time,is->frame_timer);
                 *remaining_time = FFMIN(is->frame_timer + delay - time, *remaining_time);
                 return;
             }
 
             is->frame_timer += delay;
             if (delay > 0 && time - is->frame_timer > AV_SYNC_THRESHOLD_MAX){
-                av_log(NULL, AV_LOG_DEBUG, "log5\n");
                 is->frame_timer = time;
             }
 
             SDL_LockMutex(is->pictq.mutex);
             if (!redisplay && !isnan(vp->pts_s)){
-                av_log(NULL, AV_LOG_DEBUG, "log6, pts:%lf\n", vp->pts_s);
+                if(is->stream_seeking)
+                    av_log(NULL, AV_LOG_DEBUG, "update video pts:%lf\n", vp->pts_s);
                 update_video_pts(is, vp->pts_s, vp->pos, vp->serial);
             }
             SDL_UnlockMutex(is->pictq.mutex);
@@ -1696,12 +1709,10 @@ retry:
             if (frame_queue_nb_remaining(&is->pictq) > 1) {
                 Frame *nextvp = frame_queue_peek_next(&is->pictq);
                 duration = vp_duration(is, vp, nextvp);
-                av_log(NULL, AV_LOG_DEBUG, "log7\n");
                 if(!is->step && (redisplay || framedrop>0 || (framedrop && get_master_sync_type(is) != AV_SYNC_VIDEO_MASTER)) && time > is->frame_timer + duration){
                     if (!redisplay)
                         is->frame_drops_late++;
                     frame_queue_next(&is->pictq);
-                    av_log(NULL, AV_LOG_DEBUG, "log8\n");
                     redisplay = 0;
                     goto retry;
                 }
@@ -1935,6 +1946,14 @@ static int get_video_frame(VideoState *is, AVFrame *frame)
 
     if (got_picture) {
         double dpts = NAN;
+        SDL_mutex *wait_mutex = SDL_CreateMutex();
+
+        if(is->stream_seeking){
+            SDL_LockMutex(wait_mutex);
+            av_log(NULL, AV_LOG_DEBUG, "video thread wait for finishing seek\n");
+            SDL_CondWait(is->stream_seek_finish, wait_mutex);
+            SDL_UnlockMutex(wait_mutex);
+        }
 
         if (frame->pts != AV_NOPTS_VALUE)
             dpts = av_q2d(is->video_st->time_base) * frame->pts;
@@ -2174,6 +2193,7 @@ static int audio_thread(void *arg)
     VideoState *is = arg;
     AVFrame *frame = av_frame_alloc();
     Frame *af;
+    SDL_mutex *wait_mutex = SDL_CreateMutex();
 #if CONFIG_AVFILTER
     int last_serial = -1;
     int64_t dec_channel_layout;
@@ -2192,6 +2212,12 @@ static int audio_thread(void *arg)
         }
 
         if (got_frame) {
+                if(is->stream_seeking){
+                    SDL_LockMutex(wait_mutex);
+                    av_log(NULL, AV_LOG_DEBUG, "audio thread wait for finishing seek\n");
+                    SDL_CondWait(is->stream_seek_finish, wait_mutex);
+                    SDL_UnlockMutex(wait_mutex);
+                }
                 tb = (AVRational){1, frame->sample_rate};
 
 #if CONFIG_AVFILTER
@@ -2758,9 +2784,20 @@ static int audio_decode_frame(VideoState *is)
         return -1;
 
     do {
-        if (!(af = frame_queue_peek_readable(&is->sampq)))
+        if (is->stream_seeking)
+            af = frame_queue_peek_readable(&is->sampq, 10);
+        else
+            af = frame_queue_peek_readable(&is->sampq, -1);
+
+        if(af){
+            frame_queue_next(&is->sampq);
+        }
+        else{
+            if(is->stream_seeking)
+                av_log(NULL, AV_LOG_DEBUG, "wait timeout\n");
             return -1;
-        frame_queue_next(&is->sampq);
+        }
+
     } while (af->serial != is->audioq.serial);
 
     data_size = av_samples_get_buffer_size(NULL, av_frame_get_channels(af->frame),
@@ -2860,9 +2897,12 @@ static void sdl_audio_callback(void *opaque, Uint8 *stream, int len)
     audio_callback_time = av_gettime_relative();
 
     while (len > 0) {
+        /* if(is->stream_seeking) */
+        /*     av_usleep(20000); */
         if (is->audio_buf_index >= is->audio_buf_size) {
            audio_size = audio_decode_frame(is);
            if (audio_size < 0) {
+               av_log(NULL, AV_LOG_DEBUG, "output silence\n");
                 /* if error, just output silence */
                is->audio_buf      = is->silence_buf;
                is->audio_buf_size = sizeof(is->silence_buf) / is->audio_tgt.frame_size * is->audio_tgt.frame_size;
@@ -3378,16 +3418,16 @@ static int read_thread(void *arg)
             int64_t seek_max    = is->seek_rel < 0 ? seek_target - is->seek_rel - 2: INT64_MAX;
             av_log(NULL, AV_LOG_DEBUG, "\nseek_pos:%ld, seek_rel:%ld, seek_min:%ld, seek_max:%ld\n", seek_target, is->seek_rel, seek_min, seek_max);
 
-            /* stream_index = is->video_stream >= 0 ? is->video_stream : is->audio_stream; */
-            /* if(stream_index >= 0){ */
-            /*     int dir = is->seek_rel < 0 ? AVSEEK_FLAG_BACKWARD : 0; */
-            /*     AVRational time_base = is->video_stream >= 0 ? is->video_st->time_base : is->audio_st->time_base; */
-            /*     int64_t ts = av_rescale_q(seek_target, AV_TIME_BASE_Q, time_base); */
-            /*     ret = av_seek_frame(is->ic,stream_index, ts, is->seek_flags | dir); */
-            /* } */
-            /* else{ */
+            stream_index = is->video_stream >= 0 ? is->video_stream : is->audio_stream;
+            if(stream_index >= 0){
+                /* int dir = is->seek_rel < 0 ? AVSEEK_FLAG_BACKWARD : 0; */
+                AVRational time_base = is->video_stream >= 0 ? is->video_st->time_base : is->audio_st->time_base;
+                int64_t ts = av_rescale_q(seek_target, AV_TIME_BASE_Q, time_base);
+                ret = av_seek_frame(is->ic,stream_index, ts, is->seek_flags | AVSEEK_FLAG_BACKWARD);
+            }
+            else{
                 ret = avformat_seek_file(is->ic, -1, seek_min, seek_target, seek_max, is->seek_flags);
-            /* } */
+            }
             if (ret < 0) {
                 av_log(NULL, AV_LOG_ERROR,
                        "%s: error while seeking\n", is->ic->filename);
@@ -3549,6 +3589,7 @@ static VideoState *stream_open(const char *filename, AVInputFormat *iformat)
     packet_queue_init(&is->subtitleq);
 
     is->continue_read_thread = SDL_CreateCond();
+    is->stream_seek_finish = SDL_CreateCond();
 
     init_clock(&is->vidclk, &is->videoq.serial);
     init_clock(&is->audclk, &is->audioq.serial);
@@ -3680,7 +3721,7 @@ static void refresh_loop_wait_event(VideoState *is, SDL_Event *event) {
             cursor_hidden = 1;
         }
         if (remaining_time > 0.0){
-            av_log(NULL,AV_LOG_DEBUG, "sleep time:%lf\n",remaining_time);
+            /* av_log(NULL,AV_LOG_DEBUG, "sleep time:%lf\n",remaining_time); */
             av_usleep((int64_t)(remaining_time * 1000000.0));
         }
         remaining_time = REFRESH_RATE;
