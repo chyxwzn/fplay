@@ -380,6 +380,7 @@ static int autorotate = 1;
 
 /* current context */
 static int is_full_screen;
+static int toggle_fs;
 static int64_t audio_callback_time;
 
 static AVPacket flush_pkt;
@@ -1395,8 +1396,8 @@ static int video_open(VideoState *is, int force_set_video_mode, Frame *vp)
         w = screen_width;
         h = screen_height;
     } else if (!is_full_screen && vp && vp->width > (int)fs_screen_width*2/3) {
-        w = ((int)fs_screen_width/3)*2;
-        h = ((int)fs_screen_height/3)*2;
+        screen_width = w = ((int)fs_screen_width/3)*2;
+        screen_height = h = ((int)fs_screen_height/3)*2;
     } else {
         w = default_width;
         h = default_height;
@@ -2580,9 +2581,10 @@ static int subtitle_open(const char * sub_file)
     if (ret < 0)
         goto end;
     if (force_style) {
+        char *style = av_strdup(force_style);
         char **list = NULL;
         char *temp = NULL;
-        char *ptr = av_strtok(force_style, ",", &temp);
+        char *ptr = av_strtok(style, ",", &temp);
         int i = 0;
         while (ptr) {
             av_dynarray_add(&list, &i, ptr);
@@ -2599,6 +2601,7 @@ static int subtitle_open(const char * sub_file)
         }
         ass_set_style_overrides(sc->library, list);
         av_free(list);
+        av_free(style);
     }
 
     /* Decode subtitles and push them into the renderer (libass) */
@@ -3717,6 +3720,7 @@ static void toggle_full_screen(VideoState *is)
         is->pictq.queue[i].reallocate = 1;
 #endif
     is_full_screen = !is_full_screen;
+    toggle_fs = 1;
     video_open(is, 1, NULL);
 }
 
@@ -4082,6 +4086,7 @@ static void event_loop(VideoState *cur_stream)
                 }
             break;
         case SDL_VIDEORESIZE:
+            if(!toggle_fs){
                 screen = SDL_SetVideoMode(FFMIN(16383, event.resize.w), event.resize.h, 0,
                                           SDL_HWSURFACE|(is_full_screen?SDL_FULLSCREEN:SDL_RESIZABLE)|SDL_ASYNCBLIT|SDL_HWACCEL);
                 if (!screen) {
@@ -4091,6 +4096,9 @@ static void event_loop(VideoState *cur_stream)
                 screen_width  = cur_stream->width  = screen->w;
                 screen_height = cur_stream->height = screen->h;
                 cur_stream->force_refresh = 1;
+            }
+            else
+                toggle_fs = 0;
             break;
         case SDL_QUIT:
         case FF_QUIT_EVENT:

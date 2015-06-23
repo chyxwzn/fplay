@@ -73,7 +73,7 @@
     <string>Subtitle File：</string>
    </property>
   </widget>
-  <widget class="QLineEdit" name="leSubtitle">
+  <widget class="SubtitleLineEdit" name="leSubtitle">
    <property name="geometry">
     <rect>
      <x>20</x>
@@ -104,7 +104,7 @@
     <string>Video Or Audio File：</string>
    </property>
   </widget>
-  <widget class="QLineEdit" name="leMedia">
+  <widget class="MediaLineEdit" name="leMedia">
    <property name="geometry">
     <rect>
      <x>20</x>
@@ -132,8 +132,27 @@
     <string>Browse...</string>
    </property>
   </widget>
+  <zorder>leMedia</zorder>
+  <zorder>buttonPlay</zorder>
+  <zorder>buttonSubtitle</zorder>
+  <zorder>labelSubtitle</zorder>
+  <zorder>leSubtitle</zorder>
+  <zorder>labelMedia</zorder>
+  <zorder>buttonMedia</zorder>
  </widget>
  <layoutdefault spacing="6" margin="11"/>
+ <customwidgets>
+  <customwidget>
+   <class>MediaLineEdit</class>
+   <extends>QLineEdit</extends>
+   <header location="global">medialineedit.h</header>
+  </customwidget>
+  <customwidget>
+   <class>SubtitleLineEdit</class>
+   <extends>QLineEdit</extends>
+   <header location="global">subtitlelineedit.h</header>
+  </customwidget>
+ </customwidgets>
  <resources/>
  <connections/>
 </ui>

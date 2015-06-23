@@ -4,6 +4,7 @@
 #include <QWidget>
 #include <QFileDialog>
 #include <QProcess>
+#include <QDebug>
 
 namespace Ui {
 class Widget;
@@ -24,10 +25,14 @@ private slots:
 
     void on_buttonPlay_clicked();
 
+public slots:
+    void playProcess_finished(int exitCode, QProcess::ExitStatus exitStatus);
+
 private:
     Ui::Widget *ui;
     QString mediaFile;
     QString subtitleFile;
+    QProcess *playProcess;
 };
 
 #endif // WIDGET_H

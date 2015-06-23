@@ -11,10 +11,15 @@ greaterThan(QT_MAJOR_VERSION, 4): QT += widgets
 TARGET = FFplay
 TEMPLATE = app
 
+CONFIG += static
 
 SOURCES += main.cpp\
-        widget.cpp
+        widget.cpp \
+    medialineedit.cpp \
+    subtitlelineedit.cpp
 
-HEADERS  += widget.h
+HEADERS  += widget.h \
+    medialineedit.h \
+    subtitlelineedit.h
 
 FORMS    += widget.ui
