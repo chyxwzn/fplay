@@ -2708,7 +2708,9 @@ static int subtitle_thread(void *arg)
                     }
                 }
                 if(!exist){
+                    SDL_LockMutex(is->seek_mutex);
                     subtitle_process(ass_line);
+                    SDL_UnlockMutex(is->seek_mutex);
                 }
             }
             avsubtitle_free(&sp->sub);
@@ -3669,12 +3671,12 @@ static void stream_cycle_channel(VideoState *is, int codec_type)
     for (;;) {
         if (++stream_index >= nb_streams)
         {
-            if (codec_type == AVMEDIA_TYPE_SUBTITLE)
-            {
-                stream_index = -1;
-                is->last_subtitle_stream = -1;
-                goto the_end;
-            }
+            /* if (codec_type == AVMEDIA_TYPE_SUBTITLE) */
+            /* { */
+            /*     stream_index = -1; */
+            /*     is->last_subtitle_stream = -1; */
+            /*     goto the_end; */
+            /* } */
             if (start_index == -1)
                 return;
             stream_index = 0;
@@ -3833,7 +3835,8 @@ static int stream_seek_by_sub(VideoState *s, SeekType type)
     //bug
     /* if(cur_ts == 0) */
     /*     return -1; */
-    if(b && lines[b].start_pts_ms < cur_ts)
+    SDL_LockMutex(s->seek_mutex);
+    if(b >=0 && lines[b].start_pts_ms < cur_ts)
         a = b;
     while(b - a > 1){
         m = (a + b) >> 1;
@@ -3850,7 +3853,7 @@ static int stream_seek_by_sub(VideoState *s, SeekType type)
     if(type == SEEK_PREVIOUS){
         if(inside)
             m = m-1;
-        else
+        else if(b >= 0)
             m = a;
     }
     else if(type == REPEAT_CURRENT){
@@ -3893,6 +3896,7 @@ static int stream_seek_by_sub(VideoState *s, SeekType type)
         stream_seek(s, (int64_t)(lines[m].start_pts_ms * AV_TIME_BASE / 1000), (int64_t)((lines[m].start_pts_ms - cur_ts) * AV_TIME_BASE / 1000), 0);
         av_log(NULL, AV_LOG_DEBUG, "text:%s, seek pts:%ld, current pts:%ld, end pts:%ld\n", lines[m].text, lines[m].start_pts_ms, cur_ts, lines[m].end_pts_ms);
     }
+    SDL_UnlockMutex(s->seek_mutex);
     return ret;
 }
 
@@ -3936,26 +3940,8 @@ static void event_loop(VideoState *cur_stream)
             case SDLK_v:
                 stream_cycle_channel(cur_stream, AVMEDIA_TYPE_VIDEO);
                 break;
-            case SDLK_c:
-                stream_cycle_channel(cur_stream, AVMEDIA_TYPE_VIDEO);
-                stream_cycle_channel(cur_stream, AVMEDIA_TYPE_AUDIO);
-                stream_cycle_channel(cur_stream, AVMEDIA_TYPE_SUBTITLE);
-                break;
             case SDLK_t:
                 stream_cycle_channel(cur_stream, AVMEDIA_TYPE_SUBTITLE);
-                break;
-            case SDLK_w:
-#if CONFIG_AVFILTER
-                if (cur_stream->show_mode == SHOW_MODE_VIDEO && cur_stream->vfilter_idx < nb_vfilters - 1) {
-                    if (++cur_stream->vfilter_idx >= nb_vfilters)
-                        cur_stream->vfilter_idx = 0;
-                } else {
-                    cur_stream->vfilter_idx = 0;
-                    toggle_audio_display(cur_stream);
-                }
-#else
-                toggle_audio_display(cur_stream);
-#endif
                 break;
             case SDLK_r:
                 if(sc){
@@ -4019,8 +4005,8 @@ static void event_loop(VideoState *cur_stream)
                 break;
             case SDLK_RIGHT:
                 if(sc){
-                if(!cur_stream->stream_seeking)
-                    stream_seek_by_sub(cur_stream, SEEK_NEXT);
+                    if(!cur_stream->stream_seeking)
+                        stream_seek_by_sub(cur_stream, SEEK_NEXT);
                 }
                 else{
                     incr = 5.0;
@@ -4298,16 +4284,17 @@ void show_help_default(const char *opt, const char *arg)
     printf("\nWhile playing:\n"
            "q, ESC              quit\n"
            "f                   toggle full screen\n"
-           "p, SPC              pause\n"
+           "p, Space            pause\n"
            "a                   cycle audio channel in the current program\n"
            "v                   cycle video channel\n"
-           "t                   cycle subtitle channel in the current program\n"
-           "c                   cycle program\n"
-           "w                   cycle video filters or show modes\n"
-           "s                   activate frame-step mode\n"
-           "left/right          seek backward/forward 10 seconds\n"
-           "down/up             seek backward/forward 1 minute\n"
-           "page down/page up   seek backward/forward 10 minutes\n"
+           "t                   cycle internal subtitle channel in the current program\n"
+           "s                   toggle subtitle show\n"
+           "1-9                 repeat to play current sentence n times\n"
+           "r                   press to record, press again to stop and repeat to play the record\n"
+           "0                   stop repeating\n"
+           "left/right          seek backward/forward one sentence if there is a subtitle, or 5 seconds\n"
+           "down/up             volume down/volume up\n"
+           "page down/page up   seek backward/forward 5 seconds if there is a subtitle, or 20 seconds\n"
            "mouse click         seek to percentage in file corresponding to fraction of width\n"
            );
 }
@@ -4356,7 +4343,7 @@ int main(int argc, char **argv)
     signal(SIGINT , sigterm_handler); /* Interrupt (ANSI).    */
     signal(SIGTERM, sigterm_handler); /* Termination (ANSI).  */
 
-    show_banner(argc, argv, options);
+    /* show_banner(argc, argv, options); */
 
     parse_options(NULL, argc, argv, options, opt_input_file);
 

@@ -1,0 +1,14 @@
+q, ESC              quit
+f                   toggle full screen
+p, Space            pause
+a                   cycle audio channel in the current program
+v                   cycle video channel
+t                   cycle internal subtitle channel in the current program
+s                   toggle subtitle show
+1-9                 repeat to play current sentence n times
+r                   press to record, press again to stop and repeat to play the record
+0                   stop repeating
+left/right          seek backward/forward one sentence if there is a subtitle, or 5 seconds
+down/up             volume down/volume up
+page down/page up   seek backward/forward 5 seconds if there is a subtitle, or 20 seconds
+mouse click         seek to percentage in file corresponding to fraction of width

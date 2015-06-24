@@ -23,3 +23,12 @@ HEADERS  += widget.h \
     subtitlelineedit.h
 
 FORMS    += widget.ui
+
+RESOURCES += \
+    icon.qrc
+
+RC_FILE += \
+    icon.rc
+
+DISTFILES += \
+    icon.ico

@@ -5,6 +5,10 @@
 #include <QFileDialog>
 #include <QProcess>
 #include <QDebug>
+#include <QSystemTrayIcon>
+#include <QAction>
+#include <QMenu>
+#include <QMessageBox>
 
 namespace Ui {
 class Widget;
@@ -18,6 +22,9 @@ public:
     explicit Widget(QWidget *parent = 0);
     ~Widget();
 
+protected:
+    void closeEvent(QCloseEvent *event);
+
 private slots:
     void on_buttonMedia_clicked();
 
@@ -25,11 +32,21 @@ private slots:
 
     void on_buttonPlay_clicked();
 
-public slots:
+    void show_help();
+
+    void show_mainWindow();
+
+    void quit();
+
     void playProcess_finished(int exitCode, QProcess::ExitStatus exitStatus);
 
 private:
     Ui::Widget *ui;
+    QSystemTrayIcon *trayIcon;
+    QAction *showAction;
+    QAction *helpAction;
+    QAction *quitAction;
+    QMenu *trayMenu;
     QString mediaFile;
     QString subtitleFile;
     QProcess *playProcess;

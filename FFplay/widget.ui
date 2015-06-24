@@ -13,6 +13,10 @@
   <property name="windowTitle">
    <string>FFplay</string>
   </property>
+  <property name="windowIcon">
+   <iconset resource="icon.qrc">
+    <normaloff>:/icon.png</normaloff>:/icon.png</iconset>
+  </property>
   <widget class="QPushButton" name="buttonPlay">
    <property name="geometry">
     <rect>
@@ -153,6 +157,8 @@
    <header location="global">subtitlelineedit.h</header>
   </customwidget>
  </customwidgets>
- <resources/>
+ <resources>
+  <include location="icon.qrc"/>
+ </resources>
  <connections/>
 </ui>

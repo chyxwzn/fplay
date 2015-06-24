@@ -7,12 +7,31 @@ Widget::Widget(QWidget *parent) :
     playProcess(NULL)
 {
     ui->setupUi(this);
+    trayIcon = new QSystemTrayIcon(this);
+    trayIcon->setIcon(this->windowIcon());
+    showAction = new QAction(tr("show"),this);
+    connect(showAction, SIGNAL(triggered(bool)), this, SLOT(show_mainWindow()));
+    helpAction = new QAction(tr("help"), this);
+    connect(helpAction, SIGNAL(triggered(bool)), this, SLOT(show_help()));
+    quitAction = new QAction(tr("quit"), this);
+    connect(quitAction, SIGNAL(triggered(bool)), this, SLOT(quit()));
+    trayMenu = new QMenu(this);
+    trayMenu->addAction(showAction);
+    trayMenu->addAction(helpAction);
+    trayMenu->addAction(quitAction);
+    trayIcon->setContextMenu(trayMenu);
+    trayIcon->show();
     setAcceptDrops(true);
 }
 
 Widget::~Widget()
 {
     delete ui;
+    delete trayIcon;
+    delete trayMenu;
+    delete quitAction;
+    delete helpAction;
+    delete showAction;
     if(playProcess != NULL)
         delete playProcess;
 }
@@ -49,7 +68,7 @@ void Widget::on_buttonSubtitle_clicked()
 
 void Widget::on_buttonPlay_clicked()
 {
-    QString program = "fplay.exe";
+    QString program = "player.exe";
     QStringList arguments;
     QString media = ui->leMedia->text();
     QString sub = ui->leSubtitle->text();
@@ -64,13 +83,47 @@ void Widget::on_buttonPlay_clicked()
     arguments << media;
 
     playProcess = new QProcess(this);
+    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    env.insert("FONTCONFIG_PATH", QDir::currentPath()+"/fonts");
+    env.insert("FONTCONFIG_FILE", QDir::currentPath()+"/fonts/fonts.conf");
+    playProcess->setProcessEnvironment(env);
     playProcess->start(program, arguments);
     connect(playProcess, SIGNAL(finished(int,QProcess::ExitStatus)), this, SLOT(playProcess_finished(int,QProcess::ExitStatus)));
     ui->buttonPlay->setEnabled(false);
+    this->hide();
 }
 
 void Widget::playProcess_finished(int exitCode, QProcess::ExitStatus exitStatus)
 {
-//    qDebug() << exitCode;
     ui->buttonPlay->setEnabled(true);
+}
+
+void Widget::closeEvent(QCloseEvent *event)
+{
+    if(playProcess != NULL){
+        playProcess->close();
+    }
+    event->accept();
+}
+
+void Widget::show_mainWindow()
+{
+    this->show();
+}
+
+void Widget::show_help()
+{
+    QFile help("./help.txt");
+    help.open(QIODevice::ReadOnly | QIODevice::Text);
+    QTextStream text(&help);
+    QMessageBox::about(NULL, "Help", text.readAll());
+    help.close();
+}
+
+void Widget::quit()
+{
+    if(playProcess != NULL){
+        playProcess->close();
+    }
+    close();
 }
