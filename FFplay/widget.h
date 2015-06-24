@@ -9,6 +9,7 @@
 #include <QAction>
 #include <QMenu>
 #include <QMessageBox>
+#include <QGridLayout>
 
 namespace Ui {
 class Widget;

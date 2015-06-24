@@ -113,11 +113,44 @@ void Widget::show_mainWindow()
 
 void Widget::show_help()
 {
-    QFile help("./help.txt");
-    help.open(QIODevice::ReadOnly | QIODevice::Text);
-    QTextStream text(&help);
-    QMessageBox::about(NULL, "Help", text.readAll());
-    help.close();
+    QStringList actions;
+    actions << "q, ESC           \n"
+            << "f                \n"
+            << "p, Space         \n"
+            << "a                \n"
+            << "v                \n"
+            << "t                \n"
+            << "s                \n"
+            << "1-9              \n"
+            << "r                \n"
+            << "0                \n"
+            << "left/right       \n"
+            << "down/up          \n"
+            << "page down/page up\n"
+            << "mouse click      \n";
+    QStringList helps;
+    helps << "quit\n"
+          << "toggle full screen\n"
+          << "pause\n"
+          << "cycle audio channel in the current program\n"
+          << "cycle video channel\n"
+          << "cycle internal subtitle channel in the current program\n"
+          << "toggle subtitle show\n"
+          << "repeat to play current sentence n times\n"
+          << "press to record, press again to stop and repeat to play the record\n"
+          << "stop repeating\n"
+          << "seek backward/forward one sentence if there is a subtitle, or 5 seconds\n"
+          << "volume down/volume up\n"
+          << "seek backward/forward 5 seconds if there is a subtitle, or 20 seconds\n"
+          << "seek to percentage in file corresponding to fraction of width\n";
+
+    QMessageBox msgBox(QMessageBox::NoIcon, tr("Help"), tr(""), QMessageBox::Ok, NULL, Qt::Sheet);
+    QLabel action(actions.join(""));
+    QGridLayout *layout = dynamic_cast< QGridLayout *>(msgBox.layout());
+    layout->addWidget(&action, 0, 0, 1, 1);
+    QLabel help(helps.join(""));
+    layout->addWidget(&help, 0, 1, 1, 1);
+    msgBox.exec();
 }
 
 void Widget::quit()
