@@ -96,6 +96,7 @@ void Widget::on_buttonPlay_clicked()
 void Widget::playProcess_finished(int exitCode, QProcess::ExitStatus exitStatus)
 {
     ui->buttonPlay->setEnabled(true);
+    this->show();
 }
 
 void Widget::closeEvent(QCloseEvent *event)

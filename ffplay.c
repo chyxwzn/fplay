@@ -56,6 +56,7 @@
 #endif
 
 #include <SDL.h>
+#include <SDL_ttf.h>
 #include <SDL_thread.h>
 
 #include "cmdutils.h"
@@ -66,6 +67,9 @@
 
 const char program_name[] = "ffplay";
 const int program_birth_year = 2003;
+const SDL_Color RGB_Black     =  {0,     0,   0};
+const SDL_Color RGB_White = {255, 255, 255};
+const SDL_Color RGB_Red       =  {255,   0,   0};
 
 #define MAX_QUEUE_SIZE (15 * 1024 * 1024)
 #define MIN_FRAMES 5
@@ -391,6 +395,7 @@ static SubContext *sc;
 #define FF_REPEAT_SENTENCE      (SDL_USEREVENT + 4)
 
 static SDL_Surface *screen;
+static TTF_Font *font= NULL;
 
 #if CONFIG_AVFILTER
 static int opt_add_vfilter(void *optctx, const char *opt, const char *arg)
@@ -1237,6 +1242,7 @@ static void blend_text_subtitle(SDL_Overlay *bmp, double pts_s, int clear)
         pict.linesize[2] = bmp->pitches[1];
         for (; image; image = image->next) {
             uint8_t rgba_color[] = {AR(image->color), AG(image->color), AB(image->color), AA(image->color)};
+            /* av_log(NULL, AV_LOG_DEBUG,"r:%d,g:%d,b:%d,a:%d\n", rgba_color[0], rgba_color[1], rgba_color[2], rgba_color[3]); */
             FFDrawColor color;
             ff_draw_color(&sc->draw, &color, rgba_color);
             ff_blend_mask(&sc->draw, &color,
@@ -1249,12 +1255,99 @@ static void blend_text_subtitle(SDL_Overlay *bmp, double pts_s, int clear)
     SDL_UnlockYUVOverlay(bmp);
 }
 
+static int blitSurface2YUV(SDL_Surface *src, SDL_Overlay *dst, SDL_Rect *dstrect)
+{
+    Uint8 r, g, b, a;
+    int y1,u1,v1;
+    int y,x;
+    int height = src->h < dstrect->h ? src->h: dstrect->h;
+    int width =  src->w < dstrect->w ? src->w: dstrect->w;
+    int uv_off = 0;
+    Uint32 pixel;
+    static loged = 0;
+
+    if(dst->format != SDL_YV12_OVERLAY)
+        return 1;
+
+    for(y = 0; y < height; ++y)
+    {
+        for(x = 0; x < width; ++x)
+        {
+            switch(src->format->BitsPerPixel)
+            {
+                case 8:
+                    pixel = *((Uint8*)src->pixels + y*src->pitch + x);
+                    break;
+                case 16:
+                    pixel = *((Uint16*)src->pixels + y*src->pitch/2 + x);
+                    break;
+                case 32:
+                    pixel = *((Uint32*)src->pixels + y*src->pitch/4 + x);
+                    break;
+                default:
+                    return -1;
+            }
+            SDL_GetRGBA(pixel, src->format, &r, &g, &b, &a);
+            /* if(!loged) */
+            /*     av_log(NULL, AV_LOG_DEBUG,"r:%d,g:%d,b:%d,a:%d\n", r, g, b, a); */
+            rgb2yuv(r, g, b, &y1, &u1, &v1);
+
+            memset(dst->pixels[0] + (dstrect->y + y) * dst->pitches[0] + (dstrect->x + x), 
+                    (Uint8)y1, 1);
+
+            if((x%2 == 0 ) && (y%2 == 0 ))
+            {
+                memset(dst->pixels[1] + (uv_off + dstrect->y /2) * dst->pitches[1] + (dstrect->x/2 + x/2), 
+                        (Uint8)v1, 1);
+                memset(dst->pixels[2] + (uv_off + dstrect->y /2) * dst->pitches[2] + (dstrect->x/2 + x/2), 
+                        (Uint8)u1, 1);
+            }
+        }
+        if(y%2 == 0)++uv_off;
+    }
+    loged = 1;
+    return 0;
+}
+
+static void int_2_str(int v, char *h, char *l)
+{
+    int high = v / 10;
+    int low = v % 10;
+    *h = '0' + high;
+    *l = '0' + low;
+}
+
+static void blend_time(SDL_Overlay *bmp, double pts_s, SDL_Rect *rect)
+{
+    int64_t time = (int64_t)pts_s;
+    char str[9] = {0};
+    int hour = time / 3600;
+    int min = (time % 3600) / 60;
+    int sec = time % 60;
+    SDL_Surface *text_surface = NULL;
+    int_2_str(hour, str, str + 1);
+    str[2] = ':';
+    int_2_str(min, str + 3, str + 4);
+    str[5] = ':';
+    int_2_str(sec, str + 6, str + 7);
+    /* av_log(NULL, AV_LOG_DEBUG,"time:%s\n", str); */
+    text_surface = TTF_RenderText_Blended(font,str,RGB_Red);
+    /* text_surface = TTF_RenderText_Shaded(font,str,RGB_Black,RGB_White); */
+    /* av_log(NULL, AV_LOG_DEBUG,"text surface, width:%d,height:%d,bits per pixel:%d,pitch:%d\n",text_surface->w,text_surface->h,text_surface->format->BitsPerPixel,text_surface->pitch); */
+    rect->w = text_surface->w;
+    rect->h = text_surface->h;
+    blitSurface2YUV(text_surface, bmp, rect);
+    SDL_FreeSurface(text_surface);
+}
+
 static void video_image_display(VideoState *is)
 {
     Frame *vp;
     Frame *sp;
     AVPicture pict;
     SDL_Rect rect;
+    SDL_Rect cur_pts_rect;
+    SDL_Rect total_time_rect;
     int i;
 
     vp = frame_queue_peek(&is->pictq);
@@ -1282,6 +1375,9 @@ static void video_image_display(VideoState *is)
         }
         else if(sc){
             blend_text_subtitle(vp->bmp, vp->pts_s, 0);
+            cur_pts_rect.x = 10;
+            cur_pts_rect.y = 10;
+            blend_time(vp->bmp, vp->pts_s, &cur_pts_rect);
         }
 
         /* av_log(NULL, AV_LOG_DEBUG,"is->xleft:%d, is->ytop:%d, is->width:%d, is->height:%d, vp->width:%d, vp->height:%d, vp->sar:%d",is->xleft, is->ytop, is->width, is->height, vp->width, vp->height, vp->sar); */
@@ -1353,6 +1449,8 @@ static void do_exit(VideoState *is)
     avformat_network_deinit();
     if (show_status)
         printf("\n");
+    TTF_CloseFont(font);
+    TTF_Quit();
     SDL_Quit();
     av_log(NULL, AV_LOG_QUIET, "%s", "");
     exit(0);
@@ -1407,6 +1505,7 @@ static int video_open(VideoState *is, int force_set_video_mode, Frame *vp)
        && is->height== screen->h && screen->h == h && !force_set_video_mode)
         return 0;
     /* av_log(NULL,AV_LOG_DEBUG,"w:%d,h:%d,dw:%d,dh:%d,sw:%d,sh:%d\n",w,h,default_width,default_height,screen_width,screen_height); */
+    SDL_WM_SetIcon(SDL_LoadBMP("icon.bmp"), NULL);
     screen = SDL_SetVideoMode(w, h, 0, flags);
     if (!screen) {
         av_log(NULL, AV_LOG_FATAL, "SDL: could not set video mode - exiting\n");
@@ -4401,6 +4500,14 @@ int main(int argc, char **argv)
             if(ret >= 0)
                 break;
         }
+    }
+
+    if(TTF_Init() == -1){
+        av_log(NULL, AV_LOG_ERROR,"font init failure %s\n",SDL_GetError());
+    }
+    font  = TTF_OpenFont("c:/Windows/fonts/simhei.ttf",40);
+    if(font == NULL){
+        av_log(NULL, AV_LOG_ERROR,"font open failure %s\n",SDL_GetError());
     }
 
     is = stream_open(input_filename, file_iformat);
