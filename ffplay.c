@@ -916,235 +916,6 @@ static void fill_border(int xleft, int ytop, int width, int height, int x, int y
                    color, update);
 }
 
-#define ALPHA_BLEND(a, oldp, newp, s)\
-((((oldp << s) * (255 - (a))) + (newp * (a))) / (255 << s))
-
-#define RGBA_IN(r, g, b, a, s)\
-{\
-    unsigned int v = ((const uint32_t *)(s))[0];\
-    a = (v >> 24) & 0xff;\
-    r = (v >> 16) & 0xff;\
-    g = (v >> 8) & 0xff;\
-    b = v & 0xff;\
-}
-
-#define YUVA_IN(y, u, v, a, s, pal)\
-{\
-    unsigned int val = ((const uint32_t *)(pal))[*(const uint8_t*)(s)];\
-    a = (val >> 24) & 0xff;\
-    y = (val >> 16) & 0xff;\
-    u = (val >> 8) & 0xff;\
-    v = val & 0xff;\
-}
-
-#define YUVA_OUT(d, y, u, v, a)\
-{\
-    ((uint32_t *)(d))[0] = (a << 24) | (y << 16) | (u << 8) | v;\
-}
-
-
-#define BPP 1
-
-static void blend_subrect(AVPicture *dst, const AVSubtitleRect *rect, int imgw, int imgh)
-{
-    int wrap, wrap3, width2, skip2;
-    int y, u, v, a, u1, v1, a1, w, h;
-    uint8_t *lum, *cb, *cr;
-    const uint8_t *p;
-    const uint32_t *pal;
-    int dstx, dsty, dstw, dsth;
-
-    dstw = av_clip(rect->w, 0, imgw);
-    dsth = av_clip(rect->h, 0, imgh);
-    dstx = av_clip(rect->x, 0, imgw - dstw);
-    dsty = av_clip(rect->y, 0, imgh - dsth);
-    lum = dst->data[0] + dsty * dst->linesize[0];
-    cb  = dst->data[1] + (dsty >> 1) * dst->linesize[1];
-    cr  = dst->data[2] + (dsty >> 1) * dst->linesize[2];
-
-    width2 = ((dstw + 1) >> 1) + (dstx & ~dstw & 1);
-    skip2 = dstx >> 1;
-    wrap = dst->linesize[0];
-    wrap3 = rect->pict.linesize[0];
-    p = rect->pict.data[0];
-    pal = (const uint32_t *)rect->pict.data[1];  /* Now in YCrCb! */
-
-    if (dsty & 1) {
-        lum += dstx;
-        cb += skip2;
-        cr += skip2;
-
-        if (dstx & 1) {
-            YUVA_IN(y, u, v, a, p, pal);
-            lum[0] = ALPHA_BLEND(a, lum[0], y, 0);
-            cb[0] = ALPHA_BLEND(a >> 2, cb[0], u, 0);
-            cr[0] = ALPHA_BLEND(a >> 2, cr[0], v, 0);
-            cb++;
-            cr++;
-            lum++;
-            p += BPP;
-        }
-        for (w = dstw - (dstx & 1); w >= 2; w -= 2) {
-            YUVA_IN(y, u, v, a, p, pal);
-            u1 = u;
-            v1 = v;
-            a1 = a;
-            lum[0] = ALPHA_BLEND(a, lum[0], y, 0);
-
-            YUVA_IN(y, u, v, a, p + BPP, pal);
-            u1 += u;
-            v1 += v;
-            a1 += a;
-            lum[1] = ALPHA_BLEND(a, lum[1], y, 0);
-            cb[0] = ALPHA_BLEND(a1 >> 2, cb[0], u1, 1);
-            cr[0] = ALPHA_BLEND(a1 >> 2, cr[0], v1, 1);
-            cb++;
-            cr++;
-            p += 2 * BPP;
-            lum += 2;
-        }
-        if (w) {
-            YUVA_IN(y, u, v, a, p, pal);
-            lum[0] = ALPHA_BLEND(a, lum[0], y, 0);
-            cb[0] = ALPHA_BLEND(a >> 2, cb[0], u, 0);
-            cr[0] = ALPHA_BLEND(a >> 2, cr[0], v, 0);
-            p++;
-            lum++;
-        }
-        p += wrap3 - dstw * BPP;
-        lum += wrap - dstw - dstx;
-        cb += dst->linesize[1] - width2 - skip2;
-        cr += dst->linesize[2] - width2 - skip2;
-    }
-    for (h = dsth - (dsty & 1); h >= 2; h -= 2) {
-        lum += dstx;
-        cb += skip2;
-        cr += skip2;
-
-        if (dstx & 1) {
-            YUVA_IN(y, u, v, a, p, pal);
-            u1 = u;
-            v1 = v;
-            a1 = a;
-            lum[0] = ALPHA_BLEND(a, lum[0], y, 0);
-            p += wrap3;
-            lum += wrap;
-            YUVA_IN(y, u, v, a, p, pal);
-            u1 += u;
-            v1 += v;
-            a1 += a;
-            lum[0] = ALPHA_BLEND(a, lum[0], y, 0);
-            cb[0] = ALPHA_BLEND(a1 >> 2, cb[0], u1, 1);
-            cr[0] = ALPHA_BLEND(a1 >> 2, cr[0], v1, 1);
-            cb++;
-            cr++;
-            p += -wrap3 + BPP;
-            lum += -wrap + 1;
-        }
-        for (w = dstw - (dstx & 1); w >= 2; w -= 2) {
-            YUVA_IN(y, u, v, a, p, pal);
-            u1 = u;
-            v1 = v;
-            a1 = a;
-            lum[0] = ALPHA_BLEND(a, lum[0], y, 0);
-
-            YUVA_IN(y, u, v, a, p + BPP, pal);
-            u1 += u;
-            v1 += v;
-            a1 += a;
-            lum[1] = ALPHA_BLEND(a, lum[1], y, 0);
-            p += wrap3;
-            lum += wrap;
-
-            YUVA_IN(y, u, v, a, p, pal);
-            u1 += u;
-            v1 += v;
-            a1 += a;
-            lum[0] = ALPHA_BLEND(a, lum[0], y, 0);
-
-            YUVA_IN(y, u, v, a, p + BPP, pal);
-            u1 += u;
-            v1 += v;
-            a1 += a;
-            lum[1] = ALPHA_BLEND(a, lum[1], y, 0);
-
-            cb[0] = ALPHA_BLEND(a1 >> 2, cb[0], u1, 2);
-            cr[0] = ALPHA_BLEND(a1 >> 2, cr[0], v1, 2);
-
-            cb++;
-            cr++;
-            p += -wrap3 + 2 * BPP;
-            lum += -wrap + 2;
-        }
-        if (w) {
-            YUVA_IN(y, u, v, a, p, pal);
-            u1 = u;
-            v1 = v;
-            a1 = a;
-            lum[0] = ALPHA_BLEND(a, lum[0], y, 0);
-            p += wrap3;
-            lum += wrap;
-            YUVA_IN(y, u, v, a, p, pal);
-            u1 += u;
-            v1 += v;
-            a1 += a;
-            lum[0] = ALPHA_BLEND(a, lum[0], y, 0);
-            cb[0] = ALPHA_BLEND(a1 >> 2, cb[0], u1, 1);
-            cr[0] = ALPHA_BLEND(a1 >> 2, cr[0], v1, 1);
-            cb++;
-            cr++;
-            p += -wrap3 + BPP;
-            lum += -wrap + 1;
-        }
-        p += wrap3 + (wrap3 - dstw * BPP);
-        lum += wrap + (wrap - dstw - dstx);
-        cb += dst->linesize[1] - width2 - skip2;
-        cr += dst->linesize[2] - width2 - skip2;
-    }
-    /* handle odd height */
-    if (h) {
-        lum += dstx;
-        cb += skip2;
-        cr += skip2;
-
-        if (dstx & 1) {
-            YUVA_IN(y, u, v, a, p, pal);
-            lum[0] = ALPHA_BLEND(a, lum[0], y, 0);
-            cb[0] = ALPHA_BLEND(a >> 2, cb[0], u, 0);
-            cr[0] = ALPHA_BLEND(a >> 2, cr[0], v, 0);
-            cb++;
-            cr++;
-            lum++;
-            p += BPP;
-        }
-        for (w = dstw - (dstx & 1); w >= 2; w -= 2) {
-            YUVA_IN(y, u, v, a, p, pal);
-            u1 = u;
-            v1 = v;
-            a1 = a;
-            lum[0] = ALPHA_BLEND(a, lum[0], y, 0);
-
-            YUVA_IN(y, u, v, a, p + BPP, pal);
-            u1 += u;
-            v1 += v;
-            a1 += a;
-            lum[1] = ALPHA_BLEND(a, lum[1], y, 0);
-            cb[0] = ALPHA_BLEND(a1 >> 2, cb[0], u, 1);
-            cr[0] = ALPHA_BLEND(a1 >> 2, cr[0], v, 1);
-            cb++;
-            cr++;
-            p += 2 * BPP;
-            lum += 2;
-        }
-        if (w) {
-            YUVA_IN(y, u, v, a, p, pal);
-            lum[0] = ALPHA_BLEND(a, lum[0], y, 0);
-            cb[0] = ALPHA_BLEND(a >> 2, cb[0], u, 0);
-            cr[0] = ALPHA_BLEND(a >> 2, cr[0], v, 0);
-        }
-    }
-}
-
 static void free_picture(Frame *vp)
 {
      if (vp->bmp) {
@@ -1250,62 +1021,74 @@ static void blend_text_subtitle(SDL_Overlay *bmp, double pts_s, int clear)
                           bmp->w, bmp->h,
                           image->bitmap, image->stride, image->w, image->h,
                           3, 0, image->dst_x, image->dst_y);
+            /* av_log(NULL, AV_LOG_DEBUG,"stride:%d,w:%d,h:%d,x:%d,y:%d\n", image->stride,image->w, image->h,image->dst_x, image->dst_y); */
         }
     }
     SDL_UnlockYUVOverlay(bmp);
 }
 
-static int blitSurface2YUV(SDL_Surface *src, SDL_Overlay *dst, SDL_Rect *dstrect)
+#define ALPHA_BLEND(a, oldp, newp, s)\
+((((oldp << s) * (255 - (a))) + (newp * (a))) / (255 << s))
+
+#define RGB_TO_YUV(w,h)\
+{\
+    int x_off = w;\
+    int y_off = h;\
+    pixel = *((Uint32*)src->pixels + y_off * stride + x_off);\
+    SDL_GetRGBA(pixel, src->format, &r, &g, &b, &a);\
+    rgb2yuv(r, g, b, &y1, &u1, &v1);\
+}
+
+static int blit_surface_to_overlay(SDL_Surface *src, SDL_Overlay *dst, SDL_Rect *dstRect)
 {
     Uint8 r, g, b, a;
     int y1,u1,v1;
-    int y,x;
-    int height = src->h < dstrect->h ? src->h: dstrect->h;
-    int width =  src->w < dstrect->w ? src->w: dstrect->w;
+    int w,h;
+    int height = src->h < dstRect->h ? src->h: dstRect->h;
+    int width =  src->w < dstRect->w ? src->w: dstRect->w;
     int uv_off = 0;
+    int stride = src->pitch >> 2;
     Uint32 pixel;
-    static loged = 0;
+    Uint8 *y = dst->pixels[0] + dstRect->y * dst->pitches[0];
+    Uint8 *u = dst->pixels[2] + (dstRect->y >> 1) * dst->pitches[2];
+    Uint8 *v = dst->pixels[1] + (dstRect->y >> 1) * dst->pitches[1];
 
-    if(dst->format != SDL_YV12_OVERLAY)
-        return 1;
+    if(dst->format != SDL_YV12_OVERLAY || src->format->BitsPerPixel != 32)
+        return -1;
 
-    for(y = 0; y < height; ++y)
+    for(h = 0; h < height; h += 2)
     {
-        for(x = 0; x < width; ++x)
+        y += dstRect->x;
+        u += dstRect->x >> 1;
+        v += dstRect->x >> 1;
+        for(w = 0; w < width; w += 2)
         {
-            switch(src->format->BitsPerPixel)
-            {
-                case 8:
-                    pixel = *((Uint8*)src->pixels + y*src->pitch + x);
-                    break;
-                case 16:
-                    pixel = *((Uint16*)src->pixels + y*src->pitch/2 + x);
-                    break;
-                case 32:
-                    pixel = *((Uint32*)src->pixels + y*src->pitch/4 + x);
-                    break;
-                default:
-                    return -1;
-            }
-            SDL_GetRGBA(pixel, src->format, &r, &g, &b, &a);
-            /* if(!loged) */
-            /*     av_log(NULL, AV_LOG_DEBUG,"r:%d,g:%d,b:%d,a:%d\n", r, g, b, a); */
-            rgb2yuv(r, g, b, &y1, &u1, &v1);
+            RGB_TO_YUV(w,h);
+            y[0] = ALPHA_BLEND(a, y[0], y1, 0);
 
-            memset(dst->pixels[0] + (dstrect->y + y) * dst->pitches[0] + (dstrect->x + x), 
-                    (Uint8)y1, 1);
+            RGB_TO_YUV(w+1,h);
+            y[1] = ALPHA_BLEND(a, y[1], y1, 0);
 
-            if((x%2 == 0 ) && (y%2 == 0 ))
-            {
-                memset(dst->pixels[1] + (uv_off + dstrect->y /2) * dst->pitches[1] + (dstrect->x/2 + x/2), 
-                        (Uint8)v1, 1);
-                memset(dst->pixels[2] + (uv_off + dstrect->y /2) * dst->pitches[2] + (dstrect->x/2 + x/2), 
-                        (Uint8)u1, 1);
-            }
+            y += dst->pitches[0];
+
+            RGB_TO_YUV(w,h+1);
+            y[0] = ALPHA_BLEND(a, y[0], y1, 0);
+
+            RGB_TO_YUV(w+1,h+1);
+            y[1] = ALPHA_BLEND(a, y[1], y1, 0);
+
+            y += -dst->pitches[0] + 2; 
+
+            u[0] = ALPHA_BLEND(a >> 2, u[1], u1, 0);
+            v[0] = ALPHA_BLEND(a >> 2, v[1], v1, 0);
+
+            u++;
+            v++;
         }
-        if(y%2 == 0)++uv_off;
+        y += dst->pitches[0] - width - dstRect->x;
+        u += dst->pitches[2] - (width + dstRect->x) >> 1;
+        v += dst->pitches[1] - (width + dstRect->x) >> 1;
     }
-    loged = 1;
     return 0;
 }
 
@@ -1317,27 +1100,42 @@ static void int_2_str(int v, char *h, char *l)
     *l = '0' + low;
 }
 
-static void blend_time(SDL_Overlay *bmp, double pts_s, SDL_Rect *rect)
+static void blend_pts(SDL_Overlay *bmp, double pts_s, SDL_Rect *rect)
 {
     int64_t time = (int64_t)pts_s;
     char str[9] = {0};
     int hour = time / 3600;
     int min = (time % 3600) / 60;
+    /* int min = time / 60; */
     int sec = time % 60;
-    SDL_Surface *text_surface = NULL;
+    char *tmp = str;
+
+    SDL_Surface *pts_surface = NULL;
+    /* if(min / 100){ */
+    /*     *tmp = '0' + min / 100; */
+    /*     tmp++; */
+    /* } */
+    /* if((min % 100) / 10){ */
+    /*     *tmp = '0' + (min % 100) / 10; */
+    /*     tmp++; */
+    /* } */
+    /* if(min % 10){ */
+    /*     *tmp = '0' + (min % 100) / 10; */
+    /*     tmp++; */
+    /* } */
     int_2_str(hour, str, str + 1);
     str[2] = ':';
     int_2_str(min, str + 3, str + 4);
     str[5] = ':';
     int_2_str(sec, str + 6, str + 7);
-    /* av_log(NULL, AV_LOG_DEBUG,"time:%s\n", str); */
-    text_surface = TTF_RenderText_Blended(font,str,RGB_Red);
-    /* text_surface = TTF_RenderText_Shaded(font,str,RGB_Black,RGB_White); */
-    /* av_log(NULL, AV_LOG_DEBUG,"text surface, width:%d,height:%d,bits per pixel:%d,pitch:%d\n",text_surface->w,text_surface->h,text_surface->format->BitsPerPixel,text_surface->pitch); */
-    rect->w = text_surface->w;
-    rect->h = text_surface->h;
-    blitSurface2YUV(text_surface, bmp, rect);
-    SDL_FreeSurface(text_surface);
+    pts_surface = TTF_RenderText_Blended(font,str,RGB_White);
+    rect->w = pts_surface->w;
+    rect->h = pts_surface->h;
+    SDL_LockYUVOverlay(bmp);
+    /* av_log(NULL, AV_LOG_DEBUG,"pitch:%d,w:%d,h:%d,x:%d,y:%d\n",pts_surface->pitch,rect->w, rect->h,rect->x, rect->y); */
+    blit_surface_to_overlay(pts_surface, bmp, rect);
+    SDL_UnlockYUVOverlay(bmp);
+    SDL_FreeSurface(pts_surface);
 }
 
 static void video_image_display(VideoState *is)
@@ -1352,33 +1150,12 @@ static void video_image_display(VideoState *is)
 
     vp = frame_queue_peek(&is->pictq);
     if (vp->bmp) {
-        if (is->subtitle_st && frame_queue_nb_remaining(&is->subpq) > 0) {
-            sp = frame_queue_peek(&is->subpq);
-
-            if (vp->pts_s >= sp->pts_s + ((float) sp->sub.start_display_time / 1000)) {
-                SDL_LockYUVOverlay (vp->bmp);
-
-                pict.data[0] = vp->bmp->pixels[0];
-                pict.data[1] = vp->bmp->pixels[2];
-                pict.data[2] = vp->bmp->pixels[1];
-
-                pict.linesize[0] = vp->bmp->pitches[0];
-                pict.linesize[1] = vp->bmp->pitches[2];
-                pict.linesize[2] = vp->bmp->pitches[1];
-
-                for (i = 0; i < sp->sub.num_rects; i++)
-                    blend_subrect(&pict, sp->sub.rects[i],
-                                  vp->bmp->w, vp->bmp->h);
-
-                SDL_UnlockYUVOverlay (vp->bmp);
-            }
-        }
-        else if(sc){
+        if(sc){
             blend_text_subtitle(vp->bmp, vp->pts_s, 0);
             cur_pts_rect.x = 10;
             cur_pts_rect.y = 10;
-            blend_time(vp->bmp, vp->pts_s, &cur_pts_rect);
         }
+        blend_pts(vp->bmp, vp->pts_s, &cur_pts_rect);
 
         /* av_log(NULL, AV_LOG_DEBUG,"is->xleft:%d, is->ytop:%d, is->width:%d, is->height:%d, vp->width:%d, vp->height:%d, vp->sar:%d",is->xleft, is->ytop, is->width, is->height, vp->width, vp->height, vp->sar); */
         calculate_display_rect(&rect, is->xleft, is->ytop, is->width, is->height, vp->width, vp->height, vp->sar);
@@ -2773,27 +2550,7 @@ static int subtitle_thread(void *arg)
 
         pts_s = 0;
 
-        if (got_subtitle && sp->sub.format == 0) {
-            if (sp->sub.pts != AV_NOPTS_VALUE)
-                pts_s = sp->sub.pts / (double)AV_TIME_BASE;
-            sp->pts_s = pts_s;
-            sp->serial = is->subdec.pkt_serial;
-
-            for (i = 0; i < sp->sub.num_rects; i++)
-            {
-                for (j = 0; j < sp->sub.rects[i]->nb_colors; j++)
-                {
-                    RGBA_IN(r, g, b, a, (uint32_t*)sp->sub.rects[i]->pict.data[1] + j);
-                    y = RGB_TO_Y_CCIR(r, g, b);
-                    u = RGB_TO_U_CCIR(r, g, b, 0);
-                    v = RGB_TO_V_CCIR(r, g, b, 0);
-                    YUVA_OUT((uint32_t*)sp->sub.rects[i]->pict.data[1] + j, y, u, v, a);
-                }
-            }
-
-            /* now we can update the picture count */
-            frame_queue_push(&is->subpq);
-        } else if (got_subtitle) {
+        if (got_subtitle) {
             for (i = 0; i < sp->sub.num_rects; i++) {
                 char *ass_line = sp->sub.rects[i]->ass;
                 int exist = 0;
@@ -4505,7 +4262,7 @@ int main(int argc, char **argv)
     if(TTF_Init() == -1){
         av_log(NULL, AV_LOG_ERROR,"font init failure %s\n",SDL_GetError());
     }
-    font  = TTF_OpenFont("c:/Windows/fonts/simhei.ttf",40);
+    font  = TTF_OpenFont("c:/Windows/fonts/msyh.ttf",40);
     if(font == NULL){
         av_log(NULL, AV_LOG_ERROR,"font open failure %s\n",SDL_GetError());
     }
