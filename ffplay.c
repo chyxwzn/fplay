@@ -106,7 +106,8 @@ const SDL_Color RGB_Red       =  {255,   0,   0};
 /* TODO: We assume that a decoded and resampled frame fits into this buffer */
 #define SAMPLE_ARRAY_SIZE (8 * 65536)
 
-#define CURSOR_HIDE_DELAY 1000000
+#define CURSOR_HIDE_DELAY 2000000
+#define TIME_HIDE_DELAY 4000000
 
 static int64_t sws_flags = SWS_BICUBIC;
 
@@ -374,7 +375,9 @@ static int64_t repeat_start_pts_ms = 0;
 static int64_t repeat_end_pts_ms = 0;
 static int volume = SDL_MIX_MAXVOLUME;
 static int64_t cursor_last_shown;
+static int64_t time_last_shown;
 static int cursor_hidden = 0;
+static int time_hidden = 0;
 #if CONFIG_AVFILTER
 static const char **vfilters_list = NULL;
 static int nb_vfilters = 0;
@@ -389,6 +392,7 @@ static int64_t audio_callback_time;
 
 static AVPacket flush_pkt;
 static SubContext *sc;
+static SDL_Surface *total_time_surface;
 
 #define FF_ALLOC_EVENT          (SDL_USEREVENT)
 #define FF_QUIT_EVENT           (SDL_USEREVENT + 2)
@@ -1049,19 +1053,16 @@ static int blit_surface_to_overlay(SDL_Surface *src, SDL_Overlay *dst, SDL_Rect 
     int uv_off = 0;
     int stride = src->pitch >> 2;
     Uint32 pixel;
-    Uint8 *y = dst->pixels[0] + dstRect->y * dst->pitches[0];
-    Uint8 *u = dst->pixels[2] + (dstRect->y >> 1) * dst->pitches[2];
-    Uint8 *v = dst->pixels[1] + (dstRect->y >> 1) * dst->pitches[1];
+    Uint8 *y = dst->pixels[0] + dstRect->y * dst->pitches[0] + dstRect->x;
+    Uint8 *u = dst->pixels[2] + (dstRect->y >> 1) * dst->pitches[2] + (dstRect->x >> 1);
+    Uint8 *v = dst->pixels[1] + (dstRect->y >> 1) * dst->pitches[1] + (dstRect->x >> 1);
 
     if(dst->format != SDL_YV12_OVERLAY || src->format->BitsPerPixel != 32)
         return -1;
 
-    for(h = 0; h < height; h += 2)
+    for(h = 0; h < height - 1; h += 2)
     {
-        y += dstRect->x;
-        u += dstRect->x >> 1;
-        v += dstRect->x >> 1;
-        for(w = 0; w < width; w += 2)
+        for(w = 0; w < width - 1; w += 2)
         {
             RGB_TO_YUV(w,h);
             y[0] = ALPHA_BLEND(a, y[0], y1, 0);
@@ -1079,61 +1080,111 @@ static int blit_surface_to_overlay(SDL_Surface *src, SDL_Overlay *dst, SDL_Rect 
 
             y += -dst->pitches[0] + 2; 
 
-            u[0] = ALPHA_BLEND(a >> 2, u[1], u1, 0);
-            v[0] = ALPHA_BLEND(a >> 2, v[1], v1, 0);
+            u[0] = ALPHA_BLEND(a >> 2, u[0], u1, 0);
+            v[0] = ALPHA_BLEND(a >> 2, v[0], v1, 0);
 
             u++;
             v++;
         }
-        y += dst->pitches[0] - width - dstRect->x;
-        u += dst->pitches[2] - (width + dstRect->x) >> 1;
-        v += dst->pitches[1] - (width + dstRect->x) >> 1;
+        if(width % 2){
+            RGB_TO_YUV(w,h);
+            y[0] = ALPHA_BLEND(a, y[0], y1, 0);
+            y += dst->pitches[0];
+            RGB_TO_YUV(w,h);
+            y[0] = ALPHA_BLEND(a, y[0], y1, 0);
+            y += -dst->pitches[0] + 1; 
+            u[0] = ALPHA_BLEND(a >> 2, u[0], u1, 0);
+            v[0] = ALPHA_BLEND(a >> 2, v[0], v1, 0);
+        }
+        y += 2 * dst->pitches[0] - width;
+        u += dst->pitches[2] - width >> 1;
+        v += dst->pitches[1] - width >> 1;
+    }
+    if(height % 2){
+        for(w = 0; w < width - 1; w += 2)
+        {
+            RGB_TO_YUV(w,h);
+            y[0] = ALPHA_BLEND(a, y[0], y1, 0);
+            RGB_TO_YUV(w+1,h);
+            y[1] = ALPHA_BLEND(a, y[1], y1, 0);
+            y += 2;
+
+            u[0] = ALPHA_BLEND(a >> 2, u[0], u1, 0);
+            v[0] = ALPHA_BLEND(a >> 2, v[0], v1, 0);
+            u++;
+            v++;
+        }
+        if(width % 2){
+            RGB_TO_YUV(w,h);
+            y[0] = ALPHA_BLEND(a, y[0], y1, 0);
+            u[0] = ALPHA_BLEND(a >> 2, u[0], u1, 0);
+            v[0] = ALPHA_BLEND(a >> 2, v[0], v1, 0);
+        }
     }
     return 0;
 }
 
-static void int_2_str(int v, char *h, char *l)
+static void time_convert(int time, char *str)
 {
-    int high = v / 10;
-    int low = v % 10;
-    *h = '0' + high;
-    *l = '0' + low;
+    int min = time / 60;
+    int sec = time % 60;
+    int h = min / 100;
+    int t = (min % 100) / 10;
+    int d = min % 10;
+    char *tmp = str;
+    
+    if(h > 0){
+        *tmp++ = '0' + h;
+    }
+    if(t > 0 || h > 0){
+        *tmp++ = '0' + t;
+    }
+    *tmp++ = '0' + d;
+    *tmp++ = ':';
+    *tmp++ = '0' + sec / 10;
+    *tmp++ = '0' + sec % 10;
 }
 
-static void blend_pts(SDL_Overlay *bmp, double pts_s, SDL_Rect *rect)
+static void ttf_init(int width, int total_time)
 {
-    int64_t time = (int64_t)pts_s;
-    char str[9] = {0};
-    int hour = time / 3600;
-    int min = (time % 3600) / 60;
-    /* int min = time / 60; */
-    int sec = time % 60;
-    char *tmp = str;
+    char str[7] = {0};
+    if(TTF_Init() == -1){
+        av_log(NULL, AV_LOG_ERROR,"font init failure %s\n",SDL_GetError());
+    }
+    font  = TTF_OpenFont("c:/Windows/fonts/msyh.ttf",41);
+    if(font == NULL){
+        av_log(NULL, AV_LOG_ERROR,"font open failure %s\n",SDL_GetError());
+    }
+    time_convert(total_time, str);
+    total_time_surface = TTF_RenderText_Blended(font,str,RGB_White);
+}
 
+static void blend_time(SDL_Overlay *bmp, double pts_s)
+{
+    char str[7] = {0};
+    SDL_Rect cur_rect;
+    SDL_Rect total_rect;
     SDL_Surface *pts_surface = NULL;
-    /* if(min / 100){ */
-    /*     *tmp = '0' + min / 100; */
-    /*     tmp++; */
-    /* } */
-    /* if((min % 100) / 10){ */
-    /*     *tmp = '0' + (min % 100) / 10; */
-    /*     tmp++; */
-    /* } */
-    /* if(min % 10){ */
-    /*     *tmp = '0' + (min % 100) / 10; */
-    /*     tmp++; */
-    /* } */
-    int_2_str(hour, str, str + 1);
-    str[2] = ':';
-    int_2_str(min, str + 3, str + 4);
-    str[5] = ':';
-    int_2_str(sec, str + 6, str + 7);
+    int width = bmp->w;
+    int height = bmp->h;
+
+    time_convert((int)pts_s, str);
     pts_surface = TTF_RenderText_Blended(font,str,RGB_White);
-    rect->w = pts_surface->w;
-    rect->h = pts_surface->h;
+
+    cur_rect.x = 10;
+    cur_rect.y = ((height - pts_surface->h - 10) >> 1) << 1;
+    cur_rect.w = pts_surface->w;
+    cur_rect.h = pts_surface->h;
+
+    total_rect.x = ((width - total_time_surface->w - 10) >> 1) << 1;
+    total_rect.y = ((height - total_time_surface->h - 10) >> 1) << 1;
+    total_rect.w = total_time_surface->w;
+    total_rect.h = total_time_surface->h;
+
     SDL_LockYUVOverlay(bmp);
-    /* av_log(NULL, AV_LOG_DEBUG,"pitch:%d,w:%d,h:%d,x:%d,y:%d\n",pts_surface->pitch,rect->w, rect->h,rect->x, rect->y); */
-    blit_surface_to_overlay(pts_surface, bmp, rect);
+    /* av_log(NULL, AV_LOG_DEBUG,"text:%s,pitch:%d,w:%d,h:%d,x:%d,y:%d\n",str,pts_surface->pitch,cur_rect.w, cur_rect.h,cur_rect.x, cur_rect.y); */
+    blit_surface_to_overlay(pts_surface, bmp, &cur_rect);
+    blit_surface_to_overlay(total_time_surface, bmp, &total_rect);
     SDL_UnlockYUVOverlay(bmp);
     SDL_FreeSurface(pts_surface);
 }
@@ -1144,18 +1195,15 @@ static void video_image_display(VideoState *is)
     Frame *sp;
     AVPicture pict;
     SDL_Rect rect;
-    SDL_Rect cur_pts_rect;
-    SDL_Rect total_time_rect;
     int i;
 
     vp = frame_queue_peek(&is->pictq);
     if (vp->bmp) {
         if(sc){
             blend_text_subtitle(vp->bmp, vp->pts_s, 0);
-            cur_pts_rect.x = 10;
-            cur_pts_rect.y = 10;
         }
-        blend_pts(vp->bmp, vp->pts_s, &cur_pts_rect);
+        if(!time_hidden)
+            blend_time(vp->bmp, vp->pts_s);
 
         /* av_log(NULL, AV_LOG_DEBUG,"is->xleft:%d, is->ytop:%d, is->width:%d, is->height:%d, vp->width:%d, vp->height:%d, vp->sar:%d",is->xleft, is->ytop, is->width, is->height, vp->width, vp->height, vp->sar); */
         calculate_display_rect(&rect, is->xleft, is->ytop, is->width, is->height, vp->width, vp->height, vp->sar);
@@ -1226,6 +1274,7 @@ static void do_exit(VideoState *is)
     avformat_network_deinit();
     if (show_status)
         printf("\n");
+    SDL_FreeSurface(total_time_surface);
     TTF_CloseFont(font);
     TTF_Quit();
     SDL_Quit();
@@ -1311,6 +1360,9 @@ static int video_open(VideoState *is, int force_set_video_mode, Frame *vp)
 
     is->width  = screen->w;
     is->height = screen->h;
+
+    if(!font && vp && vp->width)
+        ttf_init(vp->width, is->ic->duration / 1000000LL);
 
     return 0;
 }
@@ -3606,6 +3658,9 @@ static void refresh_loop_wait_event(VideoState *is, SDL_Event *event) {
             SDL_ShowCursor(0);
             cursor_hidden = 1;
         }
+        if (!time_hidden && av_gettime_relative() - time_last_shown > TIME_HIDE_DELAY) {
+            time_hidden = 1;
+        }
         if (remaining_time > 0.0){
             /* av_log(NULL,AV_LOG_DEBUG, "sleep time:%lf\n",remaining_time); */
             av_usleep((int64_t)(remaining_time * 1000000.0));
@@ -3765,6 +3820,7 @@ static void event_loop(VideoState *cur_stream)
 
     for (;;) {
         double x;
+        double y;
         refresh_loop_wait_event(cur_stream, &event);
         switch (event.type) {
         case SDL_KEYDOWN:
@@ -3895,6 +3951,11 @@ static void event_loop(VideoState *cur_stream)
                 cursor_hidden = 0;
             }
             cursor_last_shown = av_gettime_relative();
+            y = event.motion.y;
+            if(time_hidden && y > cur_stream->height * 2 / 3){
+                time_hidden = 0;
+                time_last_shown = av_gettime_relative();
+            }
             if (event.type == SDL_MOUSEBUTTONDOWN) {
                 x = event.button.x;
             } else {
@@ -3902,30 +3963,30 @@ static void event_loop(VideoState *cur_stream)
                     break;
                 x = event.motion.x;
             }
-                if (seek_by_bytes || cur_stream->ic->duration <= 0) {
-                    uint64_t size =  avio_size(cur_stream->ic->pb);
-                    stream_seek(cur_stream, size*x/cur_stream->width, 0, 1);
-                } else {
-                    int64_t ts;
-                    int ns, hh, mm, ss;
-                    int tns, thh, tmm, tss;
-                    tns  = cur_stream->ic->duration / 1000000LL;
-                    thh  = tns / 3600;
-                    tmm  = (tns % 3600) / 60;
-                    tss  = (tns % 60);
-                    frac = x / cur_stream->width;
-                    ns   = frac * tns;
-                    hh   = ns / 3600;
-                    mm   = (ns % 3600) / 60;
-                    ss   = (ns % 60);
-                    av_log(NULL, AV_LOG_INFO,
-                           "Seek to %2.0f%% (%2d:%02d:%02d) of total duration (%2d:%02d:%02d)       \n", frac*100,
-                            hh, mm, ss, thh, tmm, tss);
-                    ts = frac * cur_stream->ic->duration;
-                    if (cur_stream->ic->start_time != AV_NOPTS_VALUE)
-                        ts += cur_stream->ic->start_time;
-                    stream_seek(cur_stream, ts, 0, 0);
-                }
+            if (seek_by_bytes || cur_stream->ic->duration <= 0) {
+                uint64_t size =  avio_size(cur_stream->ic->pb);
+                stream_seek(cur_stream, size*x/cur_stream->width, 0, 1);
+            } else {
+                int64_t ts;
+                int ns, hh, mm, ss;
+                int tns, thh, tmm, tss;
+                tns  = cur_stream->ic->duration / 1000000LL;
+                thh  = tns / 3600;
+                tmm  = (tns % 3600) / 60;
+                tss  = (tns % 60);
+                frac = x / cur_stream->width;
+                ns   = frac * tns;
+                hh   = ns / 3600;
+                mm   = (ns % 3600) / 60;
+                ss   = (ns % 60);
+                av_log(NULL, AV_LOG_INFO,
+                       "Seek to %2.0f%% (%2d:%02d:%02d) of total duration (%2d:%02d:%02d)       \n", frac*100,
+                        hh, mm, ss, thh, tmm, tss);
+                ts = frac * cur_stream->ic->duration;
+                if (cur_stream->ic->start_time != AV_NOPTS_VALUE)
+                    ts += cur_stream->ic->start_time;
+                stream_seek(cur_stream, ts, 0, 0);
+            }
             break;
         case SDL_VIDEORESIZE:
             if(!toggle_fs){
@@ -4257,14 +4318,6 @@ int main(int argc, char **argv)
             if(ret >= 0)
                 break;
         }
-    }
-
-    if(TTF_Init() == -1){
-        av_log(NULL, AV_LOG_ERROR,"font init failure %s\n",SDL_GetError());
-    }
-    font  = TTF_OpenFont("c:/Windows/fonts/msyh.ttf",40);
-    if(font == NULL){
-        av_log(NULL, AV_LOG_ERROR,"font open failure %s\n",SDL_GetError());
     }
 
     is = stream_open(input_filename, file_iformat);

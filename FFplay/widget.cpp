@@ -13,11 +13,14 @@ Widget::Widget(QWidget *parent) :
     connect(showAction, SIGNAL(triggered(bool)), this, SLOT(show_mainWindow()));
     helpAction = new QAction(tr("help"), this);
     connect(helpAction, SIGNAL(triggered(bool)), this, SLOT(show_help()));
+    aboutAction = new QAction(tr("about"), this);
+    connect(aboutAction, SIGNAL(triggered(bool)), this, SLOT(show_about()));
     quitAction = new QAction(tr("quit"), this);
     connect(quitAction, SIGNAL(triggered(bool)), this, SLOT(quit()));
     trayMenu = new QMenu(this);
     trayMenu->addAction(showAction);
     trayMenu->addAction(helpAction);
+    trayMenu->addAction(aboutAction);
     trayMenu->addAction(quitAction);
     trayIcon->setContextMenu(trayMenu);
     trayIcon->show();
@@ -26,12 +29,13 @@ Widget::Widget(QWidget *parent) :
 
 Widget::~Widget()
 {
-    delete ui;
-    delete trayIcon;
-    delete trayMenu;
     delete quitAction;
     delete helpAction;
+    delete aboutAction;
     delete showAction;
+    delete trayMenu;
+    delete trayIcon;
+    delete ui;
     if(playProcess != NULL)
         delete playProcess;
 }
@@ -107,9 +111,17 @@ void Widget::closeEvent(QCloseEvent *event)
     event->accept();
 }
 
+void Widget::changeEvent(QEvent *event)
+{
+    QWidget::changeEvent(event);
+    if(isMinimized()){
+        hide();
+    }
+}
+
 void Widget::show_mainWindow()
 {
-    this->show();
+    this->showNormal();
 }
 
 void Widget::show_help()
@@ -151,6 +163,15 @@ void Widget::show_help()
     layout->addWidget(&action, 0, 0, 1, 1);
     QLabel help(helps.join(""));
     layout->addWidget(&help, 0, 1, 1, 1);
+    msgBox.exec();
+}
+
+void Widget::show_about()
+{
+    QMessageBox msgBox(QMessageBox::NoIcon, tr("About FFplay"), tr(""), QMessageBox::Ok, NULL, Qt::Sheet);
+    QLabel about("Author: Shawn Ding\nEmail: chyxwzn@foxmail.com\nVersion: v1.0 based on ffmpeg\n\nIf you find out any bug or have any good idea, please contact me.");
+    QGridLayout *layout = dynamic_cast< QGridLayout *>(msgBox.layout());
+    layout->addWidget(&about, 0, 0, 1, 1);
     msgBox.exec();
 }
 

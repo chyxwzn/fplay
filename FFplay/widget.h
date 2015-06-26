@@ -25,6 +25,7 @@ public:
 
 protected:
     void closeEvent(QCloseEvent *event);
+    void changeEvent(QEvent *event);
 
 private slots:
     void on_buttonMedia_clicked();
@@ -34,6 +35,8 @@ private slots:
     void on_buttonPlay_clicked();
 
     void show_help();
+
+    void show_about();
 
     void show_mainWindow();
 
@@ -46,6 +49,7 @@ private:
     QSystemTrayIcon *trayIcon;
     QAction *showAction;
     QAction *helpAction;
+    QAction *aboutAction;
     QAction *quitAction;
     QMenu *trayMenu;
     QString mediaFile;
