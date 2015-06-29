@@ -18,6 +18,7 @@ Widget::Widget(QWidget *parent) :
     quitAction = new QAction(tr("quit"), this);
     connect(quitAction, SIGNAL(triggered(bool)), this, SLOT(quit()));
     trayMenu = new QMenu(this);
+    connect(trayIcon, SIGNAL(activated(QSystemTrayIcon::ActivationReason)), this, SLOT(trayIcon_activited(QSystemTrayIcon::ActivationReason)));
     trayMenu->addAction(showAction);
     trayMenu->addAction(helpAction);
     trayMenu->addAction(aboutAction);
@@ -43,26 +44,41 @@ Widget::~Widget()
 void Widget::on_buttonMedia_clicked()
 {
     QString dir;
-    if(!subtitleFile.isNull() && !subtitleFile.isEmpty()){
-        dir = QFileInfo(subtitleFile).absoluteDir().absolutePath();
+    if(!mediaFile.isNull() && !mediaFile.isEmpty()){
+        dir = QFileInfo(mediaFile).absolutePath();
+    }
+    else if(!subtitleFile.isNull() && !subtitleFile.isEmpty()){
+        dir = QFileInfo(subtitleFile).absolutePath();
     }
     else{
-        dir = "/";
+        dir = "d:/";
     }
     mediaFile = QFileDialog::getOpenFileName(this, tr("Open File"),
                                                     dir,
                                                     tr("Media (*)"));
     ui->leMedia->setText(mediaFile);
+    QString path = QFileInfo(mediaFile).absoluteFilePath();
+    QString basePath = path.left(path.indexOf(QFileInfo(mediaFile).suffix()));
+    QString suffixes[3] = {"srt", "ass", "lrc"};
+    for(int i = 0; i < 3; i++){
+        if(QFileInfo(basePath + suffixes[i]).exists()){
+            ui->leSubtitle->setText(basePath + suffixes[i]);
+            break;
+        }
+    }
 }
 
 void Widget::on_buttonSubtitle_clicked()
 {
     QString dir;
-    if(!mediaFile.isNull() && !mediaFile.isEmpty()){
-        dir = QFileInfo(mediaFile).absoluteDir().absolutePath();
+    if(!subtitleFile.isNull() && !subtitleFile.isEmpty()){
+        dir = QFileInfo(subtitleFile).absolutePath();
+    }
+    else if(!mediaFile.isNull() && !mediaFile.isEmpty()){
+        dir = QFileInfo(mediaFile).absolutePath();
     }
     else{
-        dir = "/";
+        dir = "d:/";
     }
     subtitleFile = QFileDialog::getOpenFileName(this, tr("Open File"),
                                                     dir,
@@ -76,14 +92,28 @@ void Widget::on_buttonPlay_clicked()
     QStringList arguments;
     QString media = ui->leMedia->text();
     QString sub = ui->leSubtitle->text();
-    if(!sub.isNull() && !sub.isEmpty()){
-        arguments << "-sub" << sub;
-        QString suffix = QFileInfo(media).suffix();
-        if(suffix == "mp3"){
-            arguments << "-force_style" << "FontSize=30,MarginV=100";
+    QString pos = getLastPosition(media);
+    if(!pos.isNull()){
+        arguments << "-ss" << pos;
+    }
+    QString suffix = QFileInfo(media).suffix();
+    QString audioTypes[8] = {"mp3","wma","wav","m4a","amr","ogg","aac","ape"};
+    bool isAudio = false;
+    for(int i = 0; i < 8; i++){
+        if(suffix == audioTypes[i]){
+            isAudio = true;
+            break;
         }
     }
-    arguments << "-af" << "volume=10dB";
+    if(isAudio)
+        arguments << "-vn";
+    if(!sub.isNull() && !sub.isEmpty()){
+        arguments << "-sub" << sub;
+        if(isAudio)
+            arguments << "-force_style" << "FontSize=30,MarginV=100";
+    }
+    if(!isAudio)
+        arguments << "-af" << "volume=10dB";
     arguments << media;
 
     playProcess = new QProcess(this);
@@ -103,6 +133,61 @@ void Widget::playProcess_finished(int exitCode, QProcess::ExitStatus exitStatus)
     this->show();
 }
 
+void Widget::trayIcon_activited(QSystemTrayIcon::ActivationReason reason)
+{
+    if(reason == QSystemTrayIcon::DoubleClick){
+        this->activateWindow();
+        this->showNormal();
+    }
+}
+
+QString Widget::getLastPosition(QString fileName)
+{
+    QFile file("history");
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)){
+        return NULL;
+    }
+    QTextStream history(&file);
+    history.setCodec("utf-8");
+    QMap<QString, QString> map;
+    QString lastPosition = NULL;
+    int lineCount = 0;
+    while(1){
+        QString line = history.readLine();
+        if(line.isNull())
+            break;
+        lineCount++;
+        QString position = line.right(line.length() - line.indexOf("last_position:") - 14);
+        QString filePath = line.left(line.indexOf("last_position:") - 1);
+        if(map.contains(filePath)){
+            map.remove(filePath);
+        }
+        map.insert(filePath, position);
+    }
+    if(map.contains(fileName))
+        lastPosition = map[fileName];
+
+    QMap<QString, QString>::iterator it;
+    if(map.size() > 10){
+        it = map.begin();
+        for(int i = 0; i < map.size() - 10; i++){
+            map.erase(it);
+            it++;
+        }
+    }
+    if(lineCount != map.size()){
+        file.close();
+        file.open(QIODevice::WriteOnly | QIODevice::Text);
+        history.setDevice(&file);
+        for(it = map.begin(); it != map.end(); it++){
+            history << it.key() << " last_position:" << it.value() << endl;
+        }
+    }
+    history.flush();
+    file.close();
+    return lastPosition;
+}
+
 void Widget::closeEvent(QCloseEvent *event)
 {
     if(playProcess != NULL){
@@ -115,7 +200,7 @@ void Widget::changeEvent(QEvent *event)
 {
     QWidget::changeEvent(event);
     if(isMinimized()){
-        hide();
+        this->hide();
     }
 }
 
@@ -180,5 +265,5 @@ void Widget::quit()
     if(playProcess != NULL){
         playProcess->close();
     }
-    close();
+    this->close();
 }

@@ -10,6 +10,7 @@
 #include <QMenu>
 #include <QMessageBox>
 #include <QGridLayout>
+#include <QMapIterator>
 
 namespace Ui {
 class Widget;
@@ -44,6 +45,8 @@ private slots:
 
     void playProcess_finished(int exitCode, QProcess::ExitStatus exitStatus);
 
+    void trayIcon_activited(QSystemTrayIcon::ActivationReason reason);
+
 private:
     Ui::Widget *ui;
     QSystemTrayIcon *trayIcon;
@@ -55,6 +58,8 @@ private:
     QString mediaFile;
     QString subtitleFile;
     QProcess *playProcess;
+
+    QString getLastPosition(QString fileName);
 };
 
 #endif // WIDGET_H

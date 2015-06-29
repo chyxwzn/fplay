@@ -207,7 +207,6 @@ typedef struct {
     int64_t end_pts_ms;
     int32_t duration;
     char * ass_line;
-    char * text;
 }SubLine;
 
 typedef struct {
@@ -219,8 +218,8 @@ typedef struct {
     FFDrawContext draw;
     int max_lines;
     int n_lines;
-    SubLine * lines;
-    SDL_Overlay *bmp;
+    SubLine *lines;
+    SDL_mutex *mutex;
 } SubContext;
 
 typedef struct VideoState {
@@ -296,6 +295,7 @@ typedef struct VideoState {
     int subtitle_stream;
     AVStream *subtitle_st;
     PacketQueue subtitleq;
+    SDL_Overlay *audio_bmp;
 
     double frame_timer;
     double frame_last_returned_time;
@@ -378,6 +378,7 @@ static int64_t cursor_last_shown;
 static int64_t time_last_shown;
 static int cursor_hidden = 0;
 static int time_hidden = 0;
+static int is_cycle_stream = 0;
 #if CONFIG_AVFILTER
 static const char **vfilters_list = NULL;
 static int nb_vfilters = 0;
@@ -397,6 +398,7 @@ static SDL_Surface *total_time_surface;
 #define FF_ALLOC_EVENT          (SDL_USEREVENT)
 #define FF_QUIT_EVENT           (SDL_USEREVENT + 2)
 #define FF_REPEAT_SENTENCE      (SDL_USEREVENT + 4)
+#define FF_SEEK_CURRENT                 (SDL_USEREVENT + 8)
 
 static SDL_Surface *screen;
 static TTF_Font *font= NULL;
@@ -599,14 +601,12 @@ static int decoder_decode_frame(VideoState *is, Decoder *d, AVFrame *frame, AVSu
             AVPacket pkt;
             do {
                 if (d->queue->nb_packets == 0){
-                    /* av_log(NULL, AV_LOG_DEBUG, "there is no packet in buffer\n"); */
                     SDL_CondSignal(d->empty_queue_cond);
                 }
                 if (packet_queue_get(d->queue, &pkt, 1, &d->pkt_serial) < 0){
                     return -1;
                 }
                 if (pkt.data == flush_pkt.data) {
-                    /* av_log(NULL, AV_LOG_DEBUG, "flush %s buffers\n", d->avctx->codec_type == AVMEDIA_TYPE_VIDEO ? "video" : "audio"); */
                     avcodec_flush_buffers(d->avctx);
                     d->finished = 0;
                     d->next_pts = d->start_pts;
@@ -920,6 +920,235 @@ static void fill_border(int xleft, int ytop, int width, int height, int x, int y
                    color, update);
 }
 
+#define ALPHA_BLEND(a, oldp, newp, s)\
+((((oldp << s) * (255 - (a))) + (newp * (a))) / (255 << s))
+
+#define RGBA_IN(r, g, b, a, s)\
+{\
+    unsigned int v = ((const uint32_t *)(s))[0];\
+    a = (v >> 24) & 0xff;\
+    r = (v >> 16) & 0xff;\
+    g = (v >> 8) & 0xff;\
+    b = v & 0xff;\
+}
+
+#define YUVA_IN(y, u, v, a, s, pal)\
+{\
+    unsigned int val = ((const uint32_t *)(pal))[*(const uint8_t*)(s)];\
+    a = (val >> 24) & 0xff;\
+    y = (val >> 16) & 0xff;\
+    u = (val >> 8) & 0xff;\
+    v = val & 0xff;\
+}
+
+#define YUVA_OUT(d, y, u, v, a)\
+{\
+    ((uint32_t *)(d))[0] = (a << 24) | (y << 16) | (u << 8) | v;\
+}
+
+
+#define BPP 1
+
+static void blend_subrect(AVPicture *dst, const AVSubtitleRect *rect, int imgw, int imgh)
+{
+    int wrap, wrap3, width2, skip2;
+    int y, u, v, a, u1, v1, a1, w, h;
+    uint8_t *lum, *cb, *cr;
+    const uint8_t *p;
+    const uint32_t *pal;
+    int dstx, dsty, dstw, dsth;
+
+    dstw = av_clip(rect->w, 0, imgw);
+    dsth = av_clip(rect->h, 0, imgh);
+    dstx = av_clip(rect->x, 0, imgw - dstw);
+    dsty = av_clip(rect->y, 0, imgh - dsth);
+    lum = dst->data[0] + dsty * dst->linesize[0];
+    cb  = dst->data[1] + (dsty >> 1) * dst->linesize[1];
+    cr  = dst->data[2] + (dsty >> 1) * dst->linesize[2];
+
+    width2 = ((dstw + 1) >> 1) + (dstx & ~dstw & 1);
+    skip2 = dstx >> 1;
+    wrap = dst->linesize[0];
+    wrap3 = rect->pict.linesize[0];
+    p = rect->pict.data[0];
+    pal = (const uint32_t *)rect->pict.data[1];  /* Now in YCrCb! */
+
+    if (dsty & 1) {
+        lum += dstx;
+        cb += skip2;
+        cr += skip2;
+
+        if (dstx & 1) {
+            YUVA_IN(y, u, v, a, p, pal);
+            lum[0] = ALPHA_BLEND(a, lum[0], y, 0);
+            cb[0] = ALPHA_BLEND(a >> 2, cb[0], u, 0);
+            cr[0] = ALPHA_BLEND(a >> 2, cr[0], v, 0);
+            cb++;
+            cr++;
+            lum++;
+            p += BPP;
+        }
+        for (w = dstw - (dstx & 1); w >= 2; w -= 2) {
+            YUVA_IN(y, u, v, a, p, pal);
+            u1 = u;
+            v1 = v;
+            a1 = a;
+            lum[0] = ALPHA_BLEND(a, lum[0], y, 0);
+
+            YUVA_IN(y, u, v, a, p + BPP, pal);
+            u1 += u;
+            v1 += v;
+            a1 += a;
+            lum[1] = ALPHA_BLEND(a, lum[1], y, 0);
+            cb[0] = ALPHA_BLEND(a1 >> 2, cb[0], u1, 1);
+            cr[0] = ALPHA_BLEND(a1 >> 2, cr[0], v1, 1);
+            cb++;
+            cr++;
+            p += 2 * BPP;
+            lum += 2;
+        }
+        if (w) {
+            YUVA_IN(y, u, v, a, p, pal);
+            lum[0] = ALPHA_BLEND(a, lum[0], y, 0);
+            cb[0] = ALPHA_BLEND(a >> 2, cb[0], u, 0);
+            cr[0] = ALPHA_BLEND(a >> 2, cr[0], v, 0);
+            p++;
+            lum++;
+        }
+        p += wrap3 - dstw * BPP;
+        lum += wrap - dstw - dstx;
+        cb += dst->linesize[1] - width2 - skip2;
+        cr += dst->linesize[2] - width2 - skip2;
+    }
+    for (h = dsth - (dsty & 1); h >= 2; h -= 2) {
+        lum += dstx;
+        cb += skip2;
+        cr += skip2;
+
+        if (dstx & 1) {
+            YUVA_IN(y, u, v, a, p, pal);
+            u1 = u;
+            v1 = v;
+            a1 = a;
+            lum[0] = ALPHA_BLEND(a, lum[0], y, 0);
+            p += wrap3;
+            lum += wrap;
+            YUVA_IN(y, u, v, a, p, pal);
+            u1 += u;
+            v1 += v;
+            a1 += a;
+            lum[0] = ALPHA_BLEND(a, lum[0], y, 0);
+            cb[0] = ALPHA_BLEND(a1 >> 2, cb[0], u1, 1);
+            cr[0] = ALPHA_BLEND(a1 >> 2, cr[0], v1, 1);
+            cb++;
+            cr++;
+            p += -wrap3 + BPP;
+            lum += -wrap + 1;
+        }
+        for (w = dstw - (dstx & 1); w >= 2; w -= 2) {
+            YUVA_IN(y, u, v, a, p, pal);
+            u1 = u;
+            v1 = v;
+            a1 = a;
+            lum[0] = ALPHA_BLEND(a, lum[0], y, 0);
+
+            YUVA_IN(y, u, v, a, p + BPP, pal);
+            u1 += u;
+            v1 += v;
+            a1 += a;
+            lum[1] = ALPHA_BLEND(a, lum[1], y, 0);
+            p += wrap3;
+            lum += wrap;
+
+            YUVA_IN(y, u, v, a, p, pal);
+            u1 += u;
+            v1 += v;
+            a1 += a;
+            lum[0] = ALPHA_BLEND(a, lum[0], y, 0);
+
+            YUVA_IN(y, u, v, a, p + BPP, pal);
+            u1 += u;
+            v1 += v;
+            a1 += a;
+            lum[1] = ALPHA_BLEND(a, lum[1], y, 0);
+
+            cb[0] = ALPHA_BLEND(a1 >> 2, cb[0], u1, 2);
+            cr[0] = ALPHA_BLEND(a1 >> 2, cr[0], v1, 2);
+
+            cb++;
+            cr++;
+            p += -wrap3 + 2 * BPP;
+            lum += -wrap + 2;
+        }
+        if (w) {
+            YUVA_IN(y, u, v, a, p, pal);
+            u1 = u;
+            v1 = v;
+            a1 = a;
+            lum[0] = ALPHA_BLEND(a, lum[0], y, 0);
+            p += wrap3;
+            lum += wrap;
+            YUVA_IN(y, u, v, a, p, pal);
+            u1 += u;
+            v1 += v;
+            a1 += a;
+            lum[0] = ALPHA_BLEND(a, lum[0], y, 0);
+            cb[0] = ALPHA_BLEND(a1 >> 2, cb[0], u1, 1);
+            cr[0] = ALPHA_BLEND(a1 >> 2, cr[0], v1, 1);
+            cb++;
+            cr++;
+            p += -wrap3 + BPP;
+            lum += -wrap + 1;
+        }
+        p += wrap3 + (wrap3 - dstw * BPP);
+        lum += wrap + (wrap - dstw - dstx);
+        cb += dst->linesize[1] - width2 - skip2;
+        cr += dst->linesize[2] - width2 - skip2;
+    }
+    /* handle odd height */
+    if (h) {
+        lum += dstx;
+        cb += skip2;
+        cr += skip2;
+
+        if (dstx & 1) {
+            YUVA_IN(y, u, v, a, p, pal);
+            lum[0] = ALPHA_BLEND(a, lum[0], y, 0);
+            cb[0] = ALPHA_BLEND(a >> 2, cb[0], u, 0);
+            cr[0] = ALPHA_BLEND(a >> 2, cr[0], v, 0);
+            cb++;
+            cr++;
+            lum++;
+            p += BPP;
+        }
+        for (w = dstw - (dstx & 1); w >= 2; w -= 2) {
+            YUVA_IN(y, u, v, a, p, pal);
+            u1 = u;
+            v1 = v;
+            a1 = a;
+            lum[0] = ALPHA_BLEND(a, lum[0], y, 0);
+
+            YUVA_IN(y, u, v, a, p + BPP, pal);
+            u1 += u;
+            v1 += v;
+            a1 += a;
+            lum[1] = ALPHA_BLEND(a, lum[1], y, 0);
+            cb[0] = ALPHA_BLEND(a1 >> 2, cb[0], u, 1);
+            cr[0] = ALPHA_BLEND(a1 >> 2, cr[0], v, 1);
+            cb++;
+            cr++;
+            p += 2 * BPP;
+            lum += 2;
+        }
+        if (w) {
+            YUVA_IN(y, u, v, a, p, pal);
+            lum[0] = ALPHA_BLEND(a, lum[0], y, 0);
+            cb[0] = ALPHA_BLEND(a >> 2, cb[0], u, 0);
+            cr[0] = ALPHA_BLEND(a >> 2, cr[0], v, 0);
+        }
+    }
+}
+
 static void free_picture(Frame *vp)
 {
      if (vp->bmp) {
@@ -957,7 +1186,6 @@ static void calculate_display_rect(SDL_Rect *rect,
     rect->y = scr_ytop  + y;
     rect->w = FFMAX(width,  1);
     rect->h = FFMAX(height, 1);
-    /* av_log(NULL, AV_LOG_DEBUG, "x:%d, y:%d, w:%d, h:%d\n",rect->x,rect->y,rect->w,rect->h); */
 }
 
 /* libass stores an RGBA color in the format RRGGBBTT, where TT is the transparency level */
@@ -983,7 +1211,16 @@ static void rgb2yuv(int r, int g, int b, int *y, int *u, int *v)
     *v = v0 + 128;
 }
 
-static void blend_text_subtitle(SDL_Overlay *bmp, double pts_s, int clear)
+static void clear_overlay(SDL_Overlay *bmp)
+{
+    int y,u,v;
+    rgb2yuv(0, 0, 0, &y, &u, &v);
+    memset(bmp->pixels[0], y, bmp->pitches[0] * bmp->h);
+    memset(bmp->pixels[2], u, bmp->pitches[2] * bmp->h);
+    memset(bmp->pixels[1], v, bmp->pitches[1] * bmp->h);
+}
+
+static void blend_text_subtitle(SDL_Overlay *bmp, double pts_s)
 {
     int detect_change = 0;
     int64_t time_ms = 0;
@@ -999,14 +1236,6 @@ static void blend_text_subtitle(SDL_Overlay *bmp, double pts_s, int clear)
     ASS_Image *image = ass_render_frame(sc->renderer, sc->track, time_ms, &detect_change);
 
     SDL_LockYUVOverlay(bmp);
-    if(clear){
-        int y,u,v;
-        rgb2yuv(0, 0, 0, &y, &u, &v);
-        memset(bmp->pixels[0], y, bmp->pitches[0] * bmp->h);
-        memset(bmp->pixels[2], u, bmp->pitches[2] * bmp->h);
-        memset(bmp->pixels[1], v, bmp->pitches[1] * bmp->h);
-    }
-
     if(show_subtitle){
         pict.data[0] = bmp->pixels[0];
         pict.data[1] = bmp->pixels[2];
@@ -1017,7 +1246,6 @@ static void blend_text_subtitle(SDL_Overlay *bmp, double pts_s, int clear)
         pict.linesize[2] = bmp->pitches[1];
         for (; image; image = image->next) {
             uint8_t rgba_color[] = {AR(image->color), AG(image->color), AB(image->color), AA(image->color)};
-            /* av_log(NULL, AV_LOG_DEBUG,"r:%d,g:%d,b:%d,a:%d\n", rgba_color[0], rgba_color[1], rgba_color[2], rgba_color[3]); */
             FFDrawColor color;
             ff_draw_color(&sc->draw, &color, rgba_color);
             ff_blend_mask(&sc->draw, &color,
@@ -1025,14 +1253,10 @@ static void blend_text_subtitle(SDL_Overlay *bmp, double pts_s, int clear)
                           bmp->w, bmp->h,
                           image->bitmap, image->stride, image->w, image->h,
                           3, 0, image->dst_x, image->dst_y);
-            /* av_log(NULL, AV_LOG_DEBUG,"stride:%d,w:%d,h:%d,x:%d,y:%d\n", image->stride,image->w, image->h,image->dst_x, image->dst_y); */
         }
     }
     SDL_UnlockYUVOverlay(bmp);
 }
-
-#define ALPHA_BLEND(a, oldp, newp, s)\
-((((oldp << s) * (255 - (a))) + (newp * (a))) / (255 << s))
 
 #define RGB_TO_YUV(w,h)\
 {\
@@ -1148,10 +1372,23 @@ static void time_convert(int time, char *str)
 static void ttf_init(int width, int total_time)
 {
     char str[7] = {0};
+    int font_size = 0;
     if(TTF_Init() == -1){
         av_log(NULL, AV_LOG_ERROR,"font init failure %s\n",SDL_GetError());
     }
-    font  = TTF_OpenFont("c:/Windows/fonts/msyh.ttf",41);
+    if(width >= 1920){
+        font_size = 36;
+    }
+    else if(width >= 1280){
+        font_size = 30;
+    }
+    else if(width >=640){
+        font_size = 22;
+    }
+    else{
+        font_size = 18;
+    }
+    font  = TTF_OpenFont("c:/Windows/fonts/msyh.ttf",font_size);
     if(font == NULL){
         av_log(NULL, AV_LOG_ERROR,"font open failure %s\n",SDL_GetError());
     }
@@ -1182,7 +1419,7 @@ static void blend_time(SDL_Overlay *bmp, double pts_s)
     total_rect.h = total_time_surface->h;
 
     SDL_LockYUVOverlay(bmp);
-    /* av_log(NULL, AV_LOG_DEBUG,"text:%s,pitch:%d,w:%d,h:%d,x:%d,y:%d\n",str,pts_surface->pitch,cur_rect.w, cur_rect.h,cur_rect.x, cur_rect.y); */
+    /* av_log(NULL, AV_LOG_DEBUG,"pts:%lf,text:%s,pitch:%d,w:%d,h:%d,x:%d,y:%d\n",pts_s,str,pts_surface->pitch,cur_rect.w, cur_rect.h,cur_rect.x, cur_rect.y); */
     blit_surface_to_overlay(pts_surface, bmp, &cur_rect);
     blit_surface_to_overlay(total_time_surface, bmp, &total_rect);
     SDL_UnlockYUVOverlay(bmp);
@@ -1199,13 +1436,35 @@ static void video_image_display(VideoState *is)
 
     vp = frame_queue_peek(&is->pictq);
     if (vp->bmp) {
-        if(sc){
-            blend_text_subtitle(vp->bmp, vp->pts_s, 0);
+        if (is->subtitle_st) {
+            if (frame_queue_nb_remaining(&is->subpq) > 0) {
+                sp = frame_queue_peek(&is->subpq);
+
+                if (vp->pts_s >= sp->pts_s + ((float) sp->sub.start_display_time / 1000)) {
+                    SDL_LockYUVOverlay (vp->bmp);
+
+                    pict.data[0] = vp->bmp->pixels[0];
+                    pict.data[1] = vp->bmp->pixels[2];
+                    pict.data[2] = vp->bmp->pixels[1];
+
+                    pict.linesize[0] = vp->bmp->pitches[0];
+                    pict.linesize[1] = vp->bmp->pitches[2];
+                    pict.linesize[2] = vp->bmp->pitches[1];
+
+                    for (i = 0; i < sp->sub.num_rects; i++)
+                        blend_subrect(&pict, sp->sub.rects[i],
+                                vp->bmp->w, vp->bmp->h);
+
+                    SDL_UnlockYUVOverlay (vp->bmp);
+                }
+            }
+            else if(sc && !isnan(vp->pts_s)){
+                blend_text_subtitle(vp->bmp, vp->pts_s);
+            }
         }
-        if(!time_hidden)
+        if(!time_hidden && !isnan(vp->pts_s))
             blend_time(vp->bmp, vp->pts_s);
 
-        /* av_log(NULL, AV_LOG_DEBUG,"is->xleft:%d, is->ytop:%d, is->width:%d, is->height:%d, vp->width:%d, vp->height:%d, vp->sar:%d",is->xleft, is->ytop, is->width, is->height, vp->width, vp->height, vp->sar); */
         calculate_display_rect(&rect, is->xleft, is->ytop, is->width, is->height, vp->width, vp->height, vp->sar);
 
         SDL_DisplayYUVOverlay(vp->bmp, &rect);
@@ -1227,23 +1486,27 @@ static double get_master_clock(VideoState *is);
 
 static void video_audio_display(VideoState *s)
 {
+    SDL_Rect rect;
+    rect.x = s->xleft;
+    rect.y = s->ytop;
+    rect.w = s->width;
+    rect.h = s->height;
+    clear_overlay(s->audio_bmp);
     if(sc){
-        SDL_Rect rect;
-
-        rect.x = s->xleft;
-        rect.y = s->ytop;
-        rect.w = s->width;
-        rect.h = s->height;
-
-        blend_text_subtitle(sc->bmp, get_master_clock(s), 1);
-        SDL_DisplayYUVOverlay(sc->bmp, &rect);
+        blend_text_subtitle(s->audio_bmp, get_master_clock(s));
     }
+    if(!time_hidden)
+        blend_time(s->audio_bmp, get_master_clock(s));
+    SDL_DisplayYUVOverlay(s->audio_bmp, &rect);
 }
 
 static void stream_close(VideoState *is)
 {
     /* XXX: use a special url_shutdown call to abort parse cleanly */
     is->abort_request = 1;
+    if (is->audio_bmp){
+         SDL_FreeYUVOverlay(is->audio_bmp);
+    }
     SDL_WaitThread(is->read_tid, NULL);
     packet_queue_destroy(&is->videoq);
     packet_queue_destroy(&is->audioq);
@@ -1264,6 +1527,9 @@ static void stream_close(VideoState *is)
 static void do_exit(VideoState *is)
 {
     if (is) {
+        FILE *fp = fopen("history", "at");
+        fprintf(fp, "%s last_position:%ld\n", is->filename, (int64_t)get_master_clock(is));
+        fclose(fp);
         stream_close(is);
     }
     av_lockmgr_register(NULL);
@@ -1295,11 +1561,10 @@ static void set_default_window_size(int width, int height, AVRational sar)
     default_height = rect.h;
 }
 
-static void subtitle_set(enum AVPixelFormat format, int width, int height)
+static void subtitle_init2(enum AVPixelFormat format, int width, int height)
 {
     ff_draw_init(&sc->draw, format, 0);
     ass_set_frame_size(sc->renderer, width, height);
-    /* av_log(NULL, AV_LOG_DEBUG, "format:%d, width:%d, height: %d\n",format,width,height); */
 }
 
 static int video_open(VideoState *is, int force_set_video_mode, Frame *vp)
@@ -1319,9 +1584,9 @@ static int video_open(VideoState *is, int force_set_video_mode, Frame *vp)
     } else if (!is_full_screen && screen_width) {
         w = screen_width;
         h = screen_height;
-    } else if (!is_full_screen && vp && vp->width > (int)fs_screen_width*2/3) {
-        screen_width = w = ((int)fs_screen_width/3)*2;
-        screen_height = h = ((int)fs_screen_height/3)*2;
+    } else if (!is_full_screen && vp && vp->width > (int)fs_screen_width * 3 / 4) {
+        screen_width = w = (int)(fs_screen_width * 3 / 4);
+        screen_height = h = (int)(vp->height * w / vp->width);
     } else {
         w = default_width;
         h = default_height;
@@ -1340,13 +1605,13 @@ static int video_open(VideoState *is, int force_set_video_mode, Frame *vp)
     if (!window_title)
         window_title = input_filename;
     SDL_WM_SetCaption(window_title, window_title);
-    if (is->audio_st && is->show_mode != SHOW_MODE_VIDEO && sc){
+    if (is->audio_st && is->show_mode != SHOW_MODE_VIDEO){
         int64_t bufferdiff;
-        sc->bmp = SDL_CreateYUVOverlay(w, h,
+        is->audio_bmp = SDL_CreateYUVOverlay(w, h,
                                        SDL_YV12_OVERLAY,
                                        screen);
-        bufferdiff = sc->bmp ? FFMAX(sc->bmp->pixels[0], sc->bmp->pixels[1]) - FFMIN(sc->bmp->pixels[0], sc->bmp->pixels[1]) : 0;
-        if (!sc->bmp || sc->bmp->pitches[0] < w || bufferdiff < (int64_t)h * sc->bmp->pitches[0]) {
+        bufferdiff = is->audio_bmp ? FFMAX(is->audio_bmp->pixels[0], is->audio_bmp->pixels[1]) - FFMIN(is->audio_bmp->pixels[0], is->audio_bmp->pixels[1]) : 0;
+        if (!is->audio_bmp || is->audio_bmp->pitches[0] < w || bufferdiff < (int64_t)h * is->audio_bmp->pitches[0]) {
             /* SDL allocates a buffer smaller than requested if the video
              * overlay hardware is unable to support the requested size. */
             av_log(NULL, AV_LOG_FATAL,
@@ -1355,14 +1620,17 @@ static int video_open(VideoState *is, int force_set_video_mode, Frame *vp)
                             "to reduce the image size.\n", w, h );
             do_exit(is);
         }
-        subtitle_set(0, w, h);
+        if(sc)
+            subtitle_init2(0, w, h);
     }
 
     is->width  = screen->w;
     is->height = screen->h;
 
-    if(!font && vp && vp->width)
-        ttf_init(vp->width, is->ic->duration / 1000000LL);
+    if(!font){
+        int width = (vp && vp->width) ? vp->width : w;
+        ttf_init(width, is->ic->duration / 1000000LL);
+    }
 
     return 0;
 }
@@ -1592,8 +1860,6 @@ static void video_refresh(void *opaque, double *remaining_time)
             redisplay = frame_queue_prev(&is->pictq);
 retry:
         if (frame_queue_nb_remaining(&is->pictq) == 0) {
-            /* if(is->stream_seeking) */
-            /*     av_log(NULL, AV_LOG_DEBUG, "no picture to display\n"); */
             // nothing to do, no picture to display in the queue
         } else {
             double last_duration, duration, delay;
@@ -1637,8 +1903,8 @@ retry:
 
             SDL_LockMutex(is->pictq.mutex);
             if (!redisplay && !isnan(vp->pts_s)){
-                if(is->stream_seeking)
-                    av_log(NULL, AV_LOG_DEBUG, "update video pts:%lf\n", vp->pts_s);
+                /* if(is->stream_seeking) */
+                /*     av_log(NULL, AV_LOG_DEBUG, "update video pts:%lf\n", vp->pts_s); */
                 update_video_pts(is, vp->pts_s, vp->pos, vp->serial);
             }
             SDL_UnlockMutex(is->pictq.mutex);
@@ -1887,10 +2153,10 @@ static int get_video_frame(VideoState *is, AVFrame *frame)
 
         if(is->stream_seeking){
             SDL_LockMutex(wait_mutex);
-            av_log(NULL, AV_LOG_DEBUG, "video thread wait for finishing seek\n");
+            /* av_log(NULL, AV_LOG_DEBUG, "video thread wait for finishing seek\n"); */
             SDL_CondWait(is->stream_seek_finish, wait_mutex);
             SDL_UnlockMutex(wait_mutex);
-            av_log(NULL, AV_LOG_DEBUG, "finish seeking audio stream\n");
+            /* av_log(NULL, AV_LOG_DEBUG, "finish seeking audio stream\n"); */
         }
 
         if (frame->pts != AV_NOPTS_VALUE)
@@ -2152,10 +2418,8 @@ static int audio_thread(void *arg)
         if (got_frame) {
                 if(is->stream_seeking){
                     SDL_LockMutex(wait_mutex);
-                    av_log(NULL, AV_LOG_DEBUG, "audio thread wait for finishing seek\n");
                     SDL_CondWait(is->stream_seek_finish, wait_mutex);
                     SDL_UnlockMutex(wait_mutex);
-                    av_log(NULL, AV_LOG_DEBUG, "finish seeking video stream\n");
                 }
                 tb = (AVRational){1, frame->sample_rate};
 
@@ -2283,7 +2547,7 @@ static int video_thread(void *arg)
                 goto the_end;
             }
             if(sc){
-                subtitle_set(frame->format, frame->width, frame->height);
+                subtitle_init2(frame->format, frame->width, frame->height);
             }
             filt_in  = is->in_video_filter;
             filt_out = is->out_video_filter;
@@ -2359,21 +2623,46 @@ static int subtitle_init()
     }
     if(subtitle_char_encoding)
         sc->charenc = (const char*)subtitle_char_encoding;
+    sc->mutex = SDL_CreateMutex();
+}
+
+static void subLine_free()
+{
+    int i;
+    SubLine *subLine = NULL;
+    for(i = 0; i < sc->n_lines; i++){
+        subLine = sc->lines + i;
+        free(subLine->ass_line);
+    }
+    if(sc->lines)
+        free(sc->lines);
+    sc->n_lines = 0;
+    sc->max_lines = 0;
+}
+
+static void subtitle_reset()
+{
+    SDL_LockMutex(sc->mutex);
+    if(sc->lines)
+        subLine_free();
+    sc->lines = NULL;
+    if (sc->track)
+        ass_free_track(sc->track);
+    sc->track = ass_new_track(sc->library);
+    SDL_UnlockMutex(sc->mutex);
 }
 
 static void subtitle_uninit()
 {
     if(sc){
+        if(sc->lines)
+            subLine_free();
         if (sc->track)
             ass_free_track(sc->track);
         if (sc->renderer)
             ass_renderer_done(sc->renderer);
         if (sc->library)
             ass_library_done(sc->library);
-        if (sc->bmp){
-             SDL_FreeYUVOverlay(sc->bmp);
-             sc->bmp = NULL;
-        }
         av_free(sc);
         sc = NULL;
     }
@@ -2421,10 +2710,9 @@ static void subtitle_process(char * ass_line)
     subLine->start_pts_ms = event->Start;
     subLine->end_pts_ms = event->Start+event->Duration;
     subLine->duration = event->Duration;
-    subLine->text = strdup(event->Text);
 
     /* av_log(NULL, AV_LOG_DEBUG, "subtitle line: %s\n",ass_line); */
-    /* av_log(NULL, AV_LOG_DEBUG, "line:%d, start pts:%ld, end pts:%ld, text:%s\n\n", line_id, subLine->start_pts_ms, subLine->end_pts_ms, subLine->text); */
+    /* av_log(NULL, AV_LOG_DEBUG, "line:%d, start pts:%ld, end pts:%ld\n", line_id, subLine->start_pts_ms, subLine->end_pts_ms); */
 }
 
 static int subtitle_open(const char * sub_file)
@@ -2579,12 +2867,20 @@ static int subtitle_thread(void *arg)
     VideoState *is = arg;
     Frame *sp;
     int got_subtitle;
-    double pts_s;
+	double pts_s;
     int ret;
     int i, j;
     int r, g, b, y, u, v, a;
 
-    ret = subtitle_init();
+    if(!is_cycle_stream){
+        ret = subtitle_init();
+    }
+    else{
+        SDL_Event event;
+        event.type = FF_SEEK_CURRENT;
+        SDL_PushEvent(&event);
+    }
+    is_cycle_stream = 0;
     if (ret < 0) {
         av_log(NULL, AV_LOG_ERROR, "Unable to init libass\n");
         return -1;
@@ -2599,16 +2895,35 @@ static int subtitle_thread(void *arg)
 
         if ((got_subtitle = decoder_decode_frame(is, &is->subdec, NULL, &sp->sub)) < 0)
             break;
+		pts_s = 0;
+        if (got_subtitle && sp->sub.format == 0) {
+            if (sp->sub.pts != AV_NOPTS_VALUE)
+                pts_s = sp->sub.pts / (double)AV_TIME_BASE;
+            sp->pts_s = pts_s;
+            sp->serial = is->subdec.pkt_serial;
 
-        pts_s = 0;
+            for (i = 0; i < sp->sub.num_rects; i++)
+            {
+                for (j = 0; j < sp->sub.rects[i]->nb_colors; j++)
+                {
+                    RGBA_IN(r, g, b, a, (uint32_t*)sp->sub.rects[i]->pict.data[1] + j);
+                    y = RGB_TO_Y_CCIR(r, g, b);
+                    u = RGB_TO_U_CCIR(r, g, b, 0);
+                    v = RGB_TO_V_CCIR(r, g, b, 0);
+                    YUVA_OUT((uint32_t*)sp->sub.rects[i]->pict.data[1] + j, y, u, v, a);
+                }
+            }
 
-        if (got_subtitle) {
+            /* now we can update the picture count */
+            frame_queue_push(&is->subpq);
+        } else if (got_subtitle) {
             for (i = 0; i < sp->sub.num_rects; i++) {
                 char *ass_line = sp->sub.rects[i]->ass;
                 int exist = 0;
                 if (!ass_line)
                     break;
-                /* av_log(NULL, AV_LOG_DEBUG, "got subtitle: %s\n", ass_line); */
+                /* av_log(NULL, AV_LOG_DEBUG, "got subtitle, clock:%lf\n", get_master_clock(is)); */
+                SDL_LockMutex(sc->mutex);
                 for(j = 0; j < sc->n_lines;j++){
                     if((sp->sub.end_display_time-sp->sub.start_display_time == sc->lines[j].duration) && strcmp((const char*)ass_line, sc->lines[j].ass_line) == 0){
                         exist = 1;
@@ -2616,10 +2931,9 @@ static int subtitle_thread(void *arg)
                     }
                 }
                 if(!exist){
-                    SDL_LockMutex(is->seek_mutex);
                     subtitle_process(ass_line);
-                    SDL_UnlockMutex(is->seek_mutex);
                 }
+                SDL_UnlockMutex(sc->mutex);
             }
             avsubtitle_free(&sp->sub);
         }
@@ -2719,8 +3033,6 @@ static int audio_decode_frame(VideoState *is)
         }
 
         if(af){
-            /* if(is->stream_seeking) */
-            /*     av_log(NULL, AV_LOG_DEBUG, "while seeking, get an audio frame\n"); */
             frame_queue_next(&is->sampq);
         }
         else{
@@ -2728,7 +3040,6 @@ static int audio_decode_frame(VideoState *is)
                 SDL_LockMutex(is->seek_mutex);
                 is->audio_flushed = 1;
                 SDL_UnlockMutex(is->seek_mutex);
-                /* av_log(NULL, AV_LOG_DEBUG, "wait timeout\n"); */
             }
             return -1;
         }
@@ -3103,7 +3414,12 @@ static void stream_component_close(VideoState *is, int stream_index)
     case AVMEDIA_TYPE_SUBTITLE:
         decoder_abort(&is->subdec, &is->subpq);
         decoder_destroy(&is->subdec);
-        subtitle_uninit();
+        if(!is_cycle_stream){
+            subtitle_uninit();
+        }
+        else{
+            subtitle_reset();
+        }
         break;
     default:
         break;
@@ -3349,7 +3665,7 @@ static int read_thread(void *arg)
             int stream_index = -1;
             int64_t seek_min    = is->seek_rel > 0 ? seek_target - is->seek_rel + 2: INT64_MIN;
             int64_t seek_max    = is->seek_rel < 0 ? seek_target - is->seek_rel - 2: INT64_MAX;
-            av_log(NULL, AV_LOG_DEBUG, "\nseek_pos:%ld, seek_rel:%ld, seek_min:%ld, seek_max:%ld\n", seek_target, is->seek_rel, seek_min, seek_max);
+            /* av_log(NULL, AV_LOG_DEBUG, "\nseek_pos:%ld, seek_rel:%ld, seek_min:%ld, seek_max:%ld\n", seek_target, is->seek_rel, seek_min, seek_max); */
 
             stream_index = is->video_stream >= 0 ? is->video_stream : is->audio_stream;
             if(stream_index >= 0){
@@ -3616,6 +3932,7 @@ static void stream_cycle_channel(VideoState *is, int codec_type)
            old_index,
            stream_index);
 
+    is_cycle_stream = 1;
     stream_component_close(is, old_index);
     stream_component_open(is, stream_index);
 }
@@ -3662,7 +3979,6 @@ static void refresh_loop_wait_event(VideoState *is, SDL_Event *event) {
             time_hidden = 1;
         }
         if (remaining_time > 0.0){
-            /* av_log(NULL,AV_LOG_DEBUG, "sleep time:%lf\n",remaining_time); */
             av_usleep((int64_t)(remaining_time * 1000000.0));
         }
         remaining_time = REFRESH_RATE;
@@ -3743,9 +4059,6 @@ static int stream_seek_by_sub(VideoState *s, SeekType type)
     a = 0;
     m = -1;
     b = sc->n_lines -1;
-    //bug
-    /* if(cur_ts == 0) */
-    /*     return -1; */
     SDL_LockMutex(s->seek_mutex);
     if(b >=0 && lines[b].start_pts_ms < cur_ts)
         a = b;
@@ -3805,7 +4118,7 @@ static int stream_seek_by_sub(VideoState *s, SeekType type)
 
     if(m >= 0 && lines[m].start_pts_ms != cur_ts){
         stream_seek(s, (int64_t)(lines[m].start_pts_ms * AV_TIME_BASE / 1000), (int64_t)((lines[m].start_pts_ms - cur_ts) * AV_TIME_BASE / 1000), 0);
-        av_log(NULL, AV_LOG_DEBUG, "text:%s, seek pts:%ld, current pts:%ld, end pts:%ld\n", lines[m].text, lines[m].start_pts_ms, cur_ts, lines[m].end_pts_ms);
+        /* av_log(NULL, AV_LOG_DEBUG, "seek pts:%ld, current pts:%ld, end pts:%ld\n", lines[m].start_pts_ms, cur_ts, lines[m].end_pts_ms); */
     }
     SDL_UnlockMutex(s->seek_mutex);
     return ret;
@@ -3906,6 +4219,7 @@ static void event_loop(VideoState *cur_stream)
                 seek_chapter(cur_stream, -1);
                 break;
             case SDLK_LEFT:
+                repeat_times = 0;
                 if(sc){
                     if(!cur_stream->stream_seeking)
                         stream_seek_by_sub(cur_stream, SEEK_PREVIOUS);
@@ -3916,6 +4230,7 @@ static void event_loop(VideoState *cur_stream)
                 }
                 break;
             case SDLK_RIGHT:
+                repeat_times = 0;
                 if(sc){
                     if(!cur_stream->stream_seeking)
                         stream_seek_by_sub(cur_stream, SEEK_NEXT);
@@ -4015,6 +4330,9 @@ static void event_loop(VideoState *cur_stream)
                 stream_seek(cur_stream, (int64_t)(repeat_start_pts_ms * AV_TIME_BASE / 1000), -2, 0);
                 repeat_times--;
             }
+            break;
+        case FF_SEEK_CURRENT:
+            stream_seek_increment(cur_stream, -0.1);
             break;
         default:
             break;
