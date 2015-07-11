@@ -96,6 +96,7 @@ void Widget::on_buttonPlay_clicked()
     if(!pos.isNull()){
         arguments << "-ss" << pos;
     }
+    arguments << "-autoexit";
     QString suffix = QFileInfo(media).suffix();
     QString audioTypes[8] = {"mp3","wma","wav","m4a","amr","ogg","aac","ape"};
     bool isAudio = false;
@@ -113,7 +114,7 @@ void Widget::on_buttonPlay_clicked()
             arguments << "-force_style" << "FontSize=30,MarginV=100";
     }
     if(!isAudio)
-        arguments << "-af" << "volume=10dB";
+        arguments << "-af" << "volume=8dB";
     arguments << media;
 
     playProcess = new QProcess(this);

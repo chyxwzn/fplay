@@ -59,11 +59,10 @@
 #include <SDL_ttf.h>
 #include <SDL_thread.h>
 
-#include "cmdutils.h"
-
 #include <assert.h>
-
 #include <ass/ass.h>
+
+#include "cmdutils.h"
 
 const char program_name[] = "ffplay";
 const int program_birth_year = 2003;
@@ -1391,6 +1390,7 @@ static void ttf_init(int width, int total_time)
     font  = TTF_OpenFont("c:/Windows/fonts/msyh.ttf",font_size);
     if(font == NULL){
         av_log(NULL, AV_LOG_ERROR,"font open failure %s\n",SDL_GetError());
+        font  = TTF_OpenFont("c:/Windows/fonts/msyh.ttc",font_size);
     }
     time_convert(total_time, str);
     total_time_surface = TTF_RenderText_Blended(font,str,RGB_White);
@@ -1436,7 +1436,10 @@ static void video_image_display(VideoState *is)
 
     vp = frame_queue_peek(&is->pictq);
     if (vp->bmp) {
-        if (is->subtitle_st) {
+        if(sc && !isnan(vp->pts_s)){
+            blend_text_subtitle(vp->bmp, vp->pts_s);
+        }
+        else if (is->subtitle_st) {
             if (frame_queue_nb_remaining(&is->subpq) > 0) {
                 sp = frame_queue_peek(&is->subpq);
 
@@ -1457,9 +1460,6 @@ static void video_image_display(VideoState *is)
 
                     SDL_UnlockYUVOverlay (vp->bmp);
                 }
-            }
-            else if(sc && !isnan(vp->pts_s)){
-                blend_text_subtitle(vp->bmp, vp->pts_s);
             }
         }
         if(!time_hidden && !isnan(vp->pts_s))
@@ -1528,7 +1528,10 @@ static void do_exit(VideoState *is)
 {
     if (is) {
         FILE *fp = fopen("history", "at");
-        fprintf(fp, "%s last_position:%ld\n", is->filename, (int64_t)get_master_clock(is));
+        if(is->ic->duration / 1000000LL - get_master_clock(is) > 20)
+            fprintf(fp, "%s last_position:%ld\n", is->filename, (int64_t)get_master_clock(is));
+        else
+            fprintf(fp, "%s last_position:%ld\n", is->filename, 0);
         fclose(fp);
         stream_close(is);
     }
@@ -4199,7 +4202,7 @@ static void event_loop(VideoState *cur_stream)
                 }
                 break;
             case SDLK_PAGEUP:
-                if (cur_stream->ic->nb_chapters <= 1) {
+                if (cur_stream->ic->nb_chapters <= 1 && !cur_stream->stream_seeking) {
                     if(sc)
                         incr = 5.0;
                     else
@@ -4209,7 +4212,7 @@ static void event_loop(VideoState *cur_stream)
                 seek_chapter(cur_stream, 1);
                 break;
             case SDLK_PAGEDOWN:
-                if (cur_stream->ic->nb_chapters <= 1) {
+                if (cur_stream->ic->nb_chapters <= 1 && !cur_stream->stream_seeking) {
                     if(sc)
                         incr = -5.0;
                     else
