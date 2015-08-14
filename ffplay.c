@@ -316,11 +316,12 @@ typedef struct VideoState {
 
 #if CONFIG_AVFILTER
     int vfilter_idx;
+    int afilter_idx;
     AVFilterContext *in_video_filter;   // the first filter in the video chain
     AVFilterContext *out_video_filter;  // the last filter in the video chain
     AVFilterContext *in_audio_filter;   // the first filter in the audio chain
     AVFilterContext *out_audio_filter;  // the last filter in the audio chain
-    AVFilterGraph *agraph;              // audio filter graph
+    /* AVFilterGraph *agraph;              // audio filter graph */
 #endif
 
     int last_video_stream, last_audio_stream, last_subtitle_stream;
@@ -336,6 +337,7 @@ static const char *window_title;
 static const char *subtitle_filename;
 static char *subtitle_char_encoding;
 static char *force_style;
+static char *working_dir;
 static int fs_screen_width;
 static int fs_screen_height;
 static int default_width  = 480;
@@ -381,6 +383,8 @@ static int is_cycle_stream = 0;
 #if CONFIG_AVFILTER
 static const char **vfilters_list = NULL;
 static int nb_vfilters = 0;
+static const char **afilters_list = NULL;
+static int nb_afilters = 0;
 static char *afilters = NULL;
 #endif
 static int autorotate = 1;
@@ -407,6 +411,13 @@ static int opt_add_vfilter(void *optctx, const char *opt, const char *arg)
 {
     GROW_ARRAY(vfilters_list, nb_vfilters);
     vfilters_list[nb_vfilters - 1] = arg;
+    return 0;
+}
+
+static int opt_add_afilter(void *optctx, const char *opt, const char *arg)
+{
+    GROW_ARRAY(afilters_list, nb_afilters);
+    afilters_list[nb_afilters - 1] = arg;
     return 0;
 }
 #endif
@@ -1527,7 +1538,14 @@ static void stream_close(VideoState *is)
 static void do_exit(VideoState *is)
 {
     if (is) {
-        FILE *fp = fopen("history", "at");
+        char history_path[500];
+        if(working_dir != NULL){
+            sprintf(history_path, "%s/%s", working_dir, "history");
+        }
+        else{
+            sprintf(history_path, "history");
+        }
+        FILE *fp = fopen(history_path, "at");
         if(is->ic->duration / 1000000LL - get_master_clock(is) > 20)
             fprintf(fp, "%s last_position:%ld\n", is->filename, (int64_t)get_master_clock(is));
         else
@@ -1539,6 +1557,7 @@ static void do_exit(VideoState *is)
     uninit_opts();
 #if CONFIG_AVFILTER
     av_freep(&vfilters_list);
+    av_freep(&afilters_list);
 #endif
     avformat_network_deinit();
     if (show_status)
@@ -1574,6 +1593,7 @@ static int video_open(VideoState *is, int force_set_video_mode, Frame *vp)
 {
     int flags = SDL_HWSURFACE | SDL_ASYNCBLIT | SDL_HWACCEL;
     int w,h;
+    char icon_path[500];
 
     if (is_full_screen) flags |= SDL_FULLSCREEN;
     else                flags |= SDL_RESIZABLE;
@@ -1599,7 +1619,13 @@ static int video_open(VideoState *is, int force_set_video_mode, Frame *vp)
        && is->height== screen->h && screen->h == h && !force_set_video_mode)
         return 0;
     /* av_log(NULL,AV_LOG_DEBUG,"w:%d,h:%d,dw:%d,dh:%d,sw:%d,sh:%d\n",w,h,default_width,default_height,screen_width,screen_height); */
-    SDL_WM_SetIcon(SDL_LoadBMP("icon.bmp"), NULL);
+    if(working_dir != NULL){
+        sprintf(icon_path, "%s/%s", working_dir, "icon.bmp");
+    }
+    else{
+        sprintf(icon_path, "icon.bmp");
+    }
+    SDL_WM_SetIcon(SDL_LoadBMP(icon_path), NULL);
     screen = SDL_SetVideoMode(w, h, 0, flags);
     if (!screen) {
         av_log(NULL, AV_LOG_FATAL, "SDL: could not set video mode - exiting\n");
@@ -2318,7 +2344,7 @@ fail:
     return ret;
 }
 
-static int configure_audio_filters(VideoState *is, const char *afilters, int force_output_format)
+static int configure_audio_filters(AVFilterGraph *graph, VideoState *is, const char *afilters, int force_output_format)
 {
     static const enum AVSampleFormat sample_fmts[] = { AV_SAMPLE_FMT_S16, AV_SAMPLE_FMT_NONE };
     int sample_rates[2] = { 0, -1 };
@@ -2330,7 +2356,7 @@ static int configure_audio_filters(VideoState *is, const char *afilters, int for
     char asrc_args[256];
     int ret;
 
-    avfilter_graph_free(&is->agraph);
+    avfilter_graph_free(graph);
     if (!(is->agraph = avfilter_graph_alloc()))
         return AVERROR(ENOMEM);
 
@@ -2405,6 +2431,7 @@ static int audio_thread(void *arg)
     int last_serial = -1;
     int64_t dec_channel_layout;
     int reconfigure;
+    AVFilterGraph *graph = avfilter_graph_alloc();
 #endif
     int got_frame = 0;
     AVRational tb;
@@ -2450,8 +2477,10 @@ static int audio_thread(void *arg)
                     is->audio_filter_src.channel_layout = dec_channel_layout;
                     is->audio_filter_src.freq           = frame->sample_rate;
                     last_serial                         = is->auddec.pkt_serial;
+                    avfilter_graph_free(&graph);
+                    graph = avfilter_graph_alloc();
 
-                    if ((ret = configure_audio_filters(is, afilters, 1)) < 0){
+                    if ((ret = configure_audio_filters(graph, is, afilters_list ? afilters_list[is->afilter_idx] : NULL, 1)) < 0){
                         goto the_end;
                     }
                 }
@@ -4162,6 +4191,9 @@ static void event_loop(VideoState *cur_stream)
                 if(cur_stream->paused)
                     step_to_next_frame(cur_stream);
                 break;
+            case SDLK_n:
+                step_to_next_frame(cur_stream);
+                break;
             case SDLK_a:
                 stream_cycle_channel(cur_stream, AVMEDIA_TYPE_AUDIO);
                 break;
@@ -4495,6 +4527,7 @@ static const OptionDef options[] = {
     { "autorotate", OPT_BOOL, { &autorotate }, "automatically rotate video", "" },
     { "sub", OPT_STRING | HAS_ARG, { &subtitle_filename }, "set external subtitle", "external subtitle" },
     { "force_style", OPT_STRING | HAS_ARG, { &force_style }, "set external subtitle force style", "external subtitle force style" },
+    { "workdir", OPT_STRING | HAS_ARG, { &working_dir }, "set working directory", "working directory" },
     { NULL, },
 };
 

@@ -16,11 +16,13 @@ CONFIG += static
 SOURCES += main.cpp\
         widget.cpp \
     medialineedit.cpp \
-    subtitlelineedit.cpp
+    subtitlelineedit.cpp \
+    playerprocess.cpp
 
 HEADERS  += widget.h \
     medialineedit.h \
-    subtitlelineedit.h
+    subtitlelineedit.h \
+    playerprocess.h
 
 FORMS    += widget.ui
 

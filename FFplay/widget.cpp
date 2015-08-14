@@ -1,16 +1,26 @@
 #include "widget.h"
 #include "ui_widget.h"
 
-Widget::Widget(QWidget *parent) :
+Widget::Widget(PlayerProcess *playerProcess, QWidget *parent) :
     QWidget(parent),
     ui(new Ui::Widget),
-    playProcess(NULL)
+    playProcess(playerProcess)
 {
-    ui->setupUi(this);
+    if(playProcess != NULL){
+        directPlay = true;
+        connect(playProcess, SIGNAL(finished(int,QProcess::ExitStatus)), this, SLOT(playProcess_finished(int,QProcess::ExitStatus)));
+    }
+    else{
+        directPlay = false;
+    }
+    if(!directPlay)
+        ui->setupUi(this);
     trayIcon = new QSystemTrayIcon(this);
-    trayIcon->setIcon(this->windowIcon());
-    showAction = new QAction(tr("show"),this);
-    connect(showAction, SIGNAL(triggered(bool)), this, SLOT(show_mainWindow()));
+    trayIcon->setIcon(QIcon(":/icon.png"));
+    if(!directPlay){
+        showAction = new QAction(tr("show"),this);
+        connect(showAction, SIGNAL(triggered(bool)), this, SLOT(show_mainWindow()));
+    }
     helpAction = new QAction(tr("help"), this);
     connect(helpAction, SIGNAL(triggered(bool)), this, SLOT(show_help()));
     aboutAction = new QAction(tr("about"), this);
@@ -19,7 +29,9 @@ Widget::Widget(QWidget *parent) :
     connect(quitAction, SIGNAL(triggered(bool)), this, SLOT(quit()));
     trayMenu = new QMenu(this);
     connect(trayIcon, SIGNAL(activated(QSystemTrayIcon::ActivationReason)), this, SLOT(trayIcon_activited(QSystemTrayIcon::ActivationReason)));
-    trayMenu->addAction(showAction);
+    if(!directPlay){
+        trayMenu->addAction(showAction);
+    }
     trayMenu->addAction(helpAction);
     trayMenu->addAction(aboutAction);
     trayMenu->addAction(quitAction);
@@ -30,10 +42,12 @@ Widget::Widget(QWidget *parent) :
 
 Widget::~Widget()
 {
+    if(!directPlay){
+        delete showAction;
+    }
     delete quitAction;
     delete helpAction;
     delete aboutAction;
-    delete showAction;
     delete trayMenu;
     delete trayIcon;
     delete ui;
@@ -88,41 +102,8 @@ void Widget::on_buttonSubtitle_clicked()
 
 void Widget::on_buttonPlay_clicked()
 {
-    QString program = "player.exe";
-    QStringList arguments;
-    QString media = ui->leMedia->text();
-    QString sub = ui->leSubtitle->text();
-    QString pos = getLastPosition(media);
-    if(!pos.isNull()){
-        arguments << "-ss" << pos;
-    }
-    arguments << "-autoexit";
-    QString suffix = QFileInfo(media).suffix();
-    QString audioTypes[8] = {"mp3","wma","wav","m4a","amr","ogg","aac","ape"};
-    bool isAudio = false;
-    for(int i = 0; i < 8; i++){
-        if(suffix == audioTypes[i]){
-            isAudio = true;
-            break;
-        }
-    }
-    if(isAudio)
-        arguments << "-vn";
-    if(!sub.isNull() && !sub.isEmpty()){
-        arguments << "-sub" << sub;
-        if(isAudio)
-            arguments << "-force_style" << "FontSize=30,MarginV=100";
-    }
-    if(!isAudio)
-        arguments << "-af" << "volume=8dB";
-    arguments << media;
-
-    playProcess = new QProcess(this);
-    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
-    env.insert("FONTCONFIG_PATH", QDir::currentPath()+"/fonts");
-    env.insert("FONTCONFIG_FILE", QDir::currentPath()+"/fonts/fonts.conf");
-    playProcess->setProcessEnvironment(env);
-    playProcess->start(program, arguments);
+    playProcess = new PlayerProcess(ui->leMedia->text(), ui->leSubtitle->text());
+    playProcess->startPlay();
     connect(playProcess, SIGNAL(finished(int,QProcess::ExitStatus)), this, SLOT(playProcess_finished(int,QProcess::ExitStatus)));
     ui->buttonPlay->setEnabled(false);
     this->hide();
@@ -130,8 +111,13 @@ void Widget::on_buttonPlay_clicked()
 
 void Widget::playProcess_finished(int exitCode, QProcess::ExitStatus exitStatus)
 {
-    ui->buttonPlay->setEnabled(true);
-    this->show();
+    if(!directPlay){
+        ui->buttonPlay->setEnabled(true);
+        this->show();
+    }
+    else{
+        close();
+    }
 }
 
 void Widget::trayIcon_activited(QSystemTrayIcon::ActivationReason reason)
@@ -140,53 +126,6 @@ void Widget::trayIcon_activited(QSystemTrayIcon::ActivationReason reason)
         this->activateWindow();
         this->showNormal();
     }
-}
-
-QString Widget::getLastPosition(QString fileName)
-{
-    QFile file("history");
-    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)){
-        return NULL;
-    }
-    QTextStream history(&file);
-    history.setCodec("utf-8");
-    QMap<QString, QString> map;
-    QString lastPosition = NULL;
-    int lineCount = 0;
-    while(1){
-        QString line = history.readLine();
-        if(line.isNull())
-            break;
-        lineCount++;
-        QString position = line.right(line.length() - line.indexOf("last_position:") - 14);
-        QString filePath = line.left(line.indexOf("last_position:") - 1);
-        if(map.contains(filePath)){
-            map.remove(filePath);
-        }
-        map.insert(filePath, position);
-    }
-    if(map.contains(fileName))
-        lastPosition = map[fileName];
-
-    QMap<QString, QString>::iterator it;
-    if(map.size() > 10){
-        it = map.begin();
-        for(int i = 0; i < map.size() - 10; i++){
-            map.erase(it);
-            it++;
-        }
-    }
-    if(lineCount != map.size()){
-        file.close();
-        file.open(QIODevice::WriteOnly | QIODevice::Text);
-        history.setDevice(&file);
-        for(it = map.begin(); it != map.end(); it++){
-            history << it.key() << " last_position:" << it.value() << endl;
-        }
-    }
-    history.flush();
-    file.close();
-    return lastPosition;
 }
 
 void Widget::closeEvent(QCloseEvent *event)

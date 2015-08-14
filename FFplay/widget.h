@@ -3,7 +3,6 @@
 
 #include <QWidget>
 #include <QFileDialog>
-#include <QProcess>
 #include <QDebug>
 #include <QSystemTrayIcon>
 #include <QAction>
@@ -11,6 +10,7 @@
 #include <QMessageBox>
 #include <QGridLayout>
 #include <QMapIterator>
+#include "playerprocess.h"
 
 namespace Ui {
 class Widget;
@@ -21,7 +21,7 @@ class Widget : public QWidget
     Q_OBJECT
 
 public:
-    explicit Widget(QWidget *parent = 0);
+    explicit Widget(PlayerProcess *playerProcess, QWidget *parent = 0);
     ~Widget();
 
 protected:
@@ -57,9 +57,8 @@ private:
     QMenu *trayMenu;
     QString mediaFile;
     QString subtitleFile;
-    QProcess *playProcess;
-
-    QString getLastPosition(QString fileName);
+    bool directPlay;
+    PlayerProcess *playProcess;
 };
 
 #endif // WIDGET_H
