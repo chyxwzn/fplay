@@ -30,8 +30,6 @@ PlayerProcess::PlayerProcess(QString mediaPath, QString subtitlePath):QProcess()
         if(isAudio)
             arguments << "-force_style" << "FontSize=30,MarginV=100";
     }
-    if(!isAudio)
-        arguments << "-af" << "volume=8dB";
     arguments << mediaPath;
 
     QProcessEnvironment env = QProcessEnvironment::systemEnvironment();

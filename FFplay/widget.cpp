@@ -1,3 +1,4 @@
+#include <QDesktopWidget>
 #include "widget.h"
 #include "ui_widget.h"
 
@@ -13,8 +14,10 @@ Widget::Widget(PlayerProcess *playerProcess, QWidget *parent) :
     else{
         directPlay = false;
     }
-    if(!directPlay)
+    if(!directPlay){
         ui->setupUi(this);
+        resetSize();
+    }
     trayIcon = new QSystemTrayIcon(this);
     trayIcon->setIcon(QIcon(":/icon.png"));
     if(!directPlay){
@@ -128,6 +131,33 @@ void Widget::trayIcon_activited(QSystemTrayIcon::ActivationReason reason)
     }
 }
 
+void Widget::resetSize()
+{
+    int screenWidth = QApplication::desktop()->width();
+    if (screenWidth > 1920){
+        double factor = 2;
+        QWidget *widget;
+        widget = this;
+        qDebug() << screenWidth << ", " << factor;
+        widget->resize((int)(widget->width()*factor),(int)(widget->height()*factor));
+        widget = ui->labelMedia;
+        ui->labelMedia->setText(QString::number(screenWidth));
+        widget->setGeometry((int)(widget->x()*factor),(int)(widget->y()*factor),(int)(widget->width()*factor),(int)(widget->height()*factor));
+        widget = ui->labelSubtitle;
+        widget->setGeometry((int)(widget->x()*factor),(int)(widget->y()*factor),(int)(widget->width()*factor),(int)(widget->height()*factor));
+        widget = ui->leSubtitle;
+        widget->setGeometry((int)(widget->x()*factor),(int)(widget->y()*factor),(int)(widget->width()*factor),(int)(widget->height()*factor));
+        widget = ui->leMedia;
+        widget->setGeometry((int)(widget->x()*factor),(int)(widget->y()*factor),(int)(widget->width()*factor),(int)(widget->height()*factor));
+        widget = ui->buttonMedia;
+        widget->setGeometry((int)(widget->x()*factor),(int)(widget->y()*factor),(int)(widget->width()*factor),(int)(widget->height()*factor));
+        widget = ui->buttonSubtitle;
+        widget->setGeometry((int)(widget->x()*factor),(int)(widget->y()*factor),(int)(widget->width()*factor),(int)(widget->height()*factor));
+        widget = ui->buttonPlay;
+        widget->setGeometry((int)(widget->x()*factor),(int)(widget->y()*factor),(int)(widget->width()*factor),(int)(widget->height()*factor));
+    }
+}
+
 void Widget::closeEvent(QCloseEvent *event)
 {
     if(playProcess != NULL){
@@ -164,8 +194,9 @@ void Widget::show_help()
             << "r                \n"
             << "0                \n"
             << "left/right       \n"
-            << "down/up          \n"
-            << "page down/page up\n"
+            << "up/down          \n"
+            << "Alt up/down      \n"
+            << "Page up/down     \n"
             << "mouse click      \n";
     QStringList helps;
     helps << "quit\n"
@@ -180,8 +211,9 @@ void Widget::show_help()
           << "press to record, press again to stop and repeat to play the record\n"
           << "stop repeating\n"
           << "seek backward/forward one sentence if there is a subtitle, or 5 seconds\n"
-          << "volume down/volume up\n"
-          << "seek backward/forward 5 seconds if there is a subtitle, or 20 seconds\n"
+          << "volume up/volume down\n"
+          << "speed up/speed down playing\n"
+          << "seek forward/backward 5 seconds if there is a subtitle, or 20 seconds\n"
           << "seek to percentage in file corresponding to fraction of width\n";
 
     QMessageBox msgBox(QMessageBox::NoIcon, tr("Help"), tr(""), QMessageBox::Ok, NULL, Qt::Sheet);

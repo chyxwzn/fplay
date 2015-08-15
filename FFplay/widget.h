@@ -59,6 +59,8 @@ private:
     QString subtitleFile;
     bool directPlay;
     PlayerProcess *playProcess;
+
+    void resetSize();
 };
 
 #endif // WIDGET_H
