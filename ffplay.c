@@ -374,7 +374,6 @@ static int64_t seek_pts_ms = 0;
 static int64_t repeat_start_pts_ms = 0;
 static int64_t repeat_end_pts_ms = 0;
 static float volume = 1.0;
-static int reconfig_afilters = 0;
 static float play_speed = 1.0;
 static int64_t cursor_last_shown;
 static int64_t time_last_shown;
@@ -2430,23 +2429,37 @@ static int configure_audio_filters(VideoState *is, const char *afilters, int for
         if ((ret = av_opt_set_int_list(filt_asink, "sample_rates"   , sample_rates   ,  -1, AV_OPT_SEARCH_CHILDREN)) < 0)
             goto end;
     }
-#if 1
-    ret = snprintf(final_afilters, sizeof(final_afilters), "volume=%f,atempo=%f%s%s", volume, play_speed, 
-                   afilters == NULL ? "" : ",", afilters == NULL ? "" : afilters);
-#else
-    ret = snprintf(final_afilters, sizeof(final_afilters), "volume=%f%s%s", volume, 
-                   afilters == NULL ? "" : ",", afilters == NULL ? "" : afilters);
-#endif
-    if ((ret = configure_filtergraph(is->agraph, final_afilters, filt_asrc, filt_asink)) < 0)
-        goto end;
 
+    snprintf(final_afilters, sizeof(final_afilters), "aformat=channel_layouts=%d,volume=%f,atempo=%f%s%s", is->audio_filter_src.channels, 
+                   volume,play_speed,afilters == NULL ? "" : ",", afilters == NULL ? "" : afilters);
+    if((ret = configure_filtergraph(is->agraph, final_afilters, filt_asrc, filt_asink)) < 0)
+        goto end;
+    
     is->in_audio_filter  = filt_asrc;
     is->out_audio_filter = filt_asink;
 
 end:
-    if (ret < 0)
+    if (ret < 0){
+        av_log(NULL, AV_LOG_ERROR, "configure_filtergraph failed\n");
         avfilter_graph_free(&is->agraph);
+    }
     return ret;
+}
+
+static void setVolumeIncrement(AVFilterGraph *graph, float incr)
+{
+    char volume_str[10];
+    volume += incr;
+    snprintf(volume_str, sizeof(volume_str),"%f",volume);
+    avfilter_graph_send_command(graph,"volume","volume",volume_str,NULL,0,0);
+}
+
+static void setPlaySpeedIncrement(AVFilterGraph *graph, float incr)
+{
+    char speed_str[10];
+    play_speed += incr;
+    snprintf(speed_str, sizeof(speed_str),"%f",play_speed);
+    avfilter_graph_send_command(graph,"atempo","tempo",speed_str,NULL,0,0);
 }
 #endif  /* CONFIG_AVFILTER */
 
@@ -2490,7 +2503,7 @@ static int audio_thread(void *arg)
                                    frame->format, av_frame_get_channels(frame))    ||
                     is->audio_filter_src.channel_layout != dec_channel_layout ||
                     is->audio_filter_src.freq           != frame->sample_rate ||
-                    is->auddec.pkt_serial               != last_serial || reconfig_afilters == 1;
+                    is->auddec.pkt_serial               != last_serial;
 
                 if (reconfigure) {
                     char buf1[1024], buf2[1024];
@@ -2506,7 +2519,6 @@ static int audio_thread(void *arg)
                     is->audio_filter_src.channel_layout = dec_channel_layout;
                     is->audio_filter_src.freq           = frame->sample_rate;
                     last_serial                         = is->auddec.pkt_serial;
-                    reconfig_afilters = 0;
 
                     if ((ret = configure_audio_filters(is, afilters, 1)) < 0){
                         goto the_end;
@@ -4243,6 +4255,8 @@ static void event_loop(VideoState *cur_stream)
                     else
                         incr = 20.0;
                     stream_seek_increment(cur_stream, incr);
+                    snprintf(info, sizeof(info), "forward: %ds", (int)incr);
+                            goto do_show_info;
                 }
                 break;
             case SDLK_PAGEDOWN:
@@ -4252,6 +4266,8 @@ static void event_loop(VideoState *cur_stream)
                     else
                         incr = -20.0;
                     stream_seek_increment(cur_stream, incr);
+                    snprintf(info, sizeof(info), "backward: %ds", (int)-incr);
+                            goto do_show_info;
                 }
                 break;
             case SDLK_LEFT:
@@ -4292,29 +4308,25 @@ static void event_loop(VideoState *cur_stream)
                 break;
             case SDLK_UP:
                 if((event.key.keysym.mod & KMOD_ALT) && play_speed < 2.0){
-                    play_speed += 0.1;
-                    reconfig_afilters = 1;
-                    snprintf(info, sizeof(info), "speed:%d%%", (int)(play_speed * 100));
+                    setPlaySpeedIncrement(cur_stream->agraph, 0.1);
+                    snprintf(info, sizeof(info), "speed:%d%%", (int)(play_speed * 100 + 0.1));
                     goto do_show_info;
                 }
-                else if(volume < 2.0){
-                    volume += 0.1;
-                    reconfig_afilters = 1;
-                    snprintf(info, sizeof(info), "volume:%d%%", (int)(volume * 100));
+                else if(volume < 3.0){
+                    setVolumeIncrement(cur_stream->agraph,0.1);
+                    snprintf(info, sizeof(info), "volume:%d%%", (int)(volume * 100 + 0.1));
                     goto do_show_info;
                 }
                 break;
             case SDLK_DOWN:
                 if((event.key.keysym.mod & KMOD_ALT) && play_speed > 0.5){
-                    play_speed -= 0.1;
-                    reconfig_afilters = 1;
-                    snprintf(info, sizeof(info), "speed:%d%%", (int)(play_speed * 100));
+                    setPlaySpeedIncrement(cur_stream->agraph, -0.1);
+                    snprintf(info, sizeof(info), "speed:%d%%", (int)(play_speed * 100 + 0.1));
                     goto do_show_info;
                 }
                 else if(volume > 0){
-                    volume -= 0.1;
-                    reconfig_afilters = 1;
-                    snprintf(info, sizeof(info), "volume:%d%%", (int)(volume * 100));
+                    setVolumeIncrement(cur_stream->agraph,-0.1);
+                    snprintf(info, sizeof(info), "volume:%d%%", (int)(volume * 100 + 0.1));
                     goto do_show_info;
                 }
                 break;
