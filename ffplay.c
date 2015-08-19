@@ -2482,6 +2482,11 @@ static int audio_thread(void *arg)
     if (!frame)
         return AVERROR(ENOMEM);
 
+    if(is_cycle_stream){
+        SDL_Event event;
+        event.type = FF_SEEK_CURRENT;
+        SDL_PushEvent(&event);
+    }
     do {
         if ((got_frame = decoder_decode_frame(is, &is->auddec, frame, NULL)) < 0){
             goto the_end;
@@ -2951,7 +2956,6 @@ static int subtitle_thread(void *arg)
         event.type = FF_SEEK_CURRENT;
         SDL_PushEvent(&event);
     }
-    is_cycle_stream = 0;
     if (ret < 0) {
         av_log(NULL, AV_LOG_ERROR, "Unable to init libass\n");
         return -1;
@@ -4007,6 +4011,9 @@ static void stream_cycle_channel(VideoState *is, int codec_type)
     is_cycle_stream = 1;
     stream_component_close(is, old_index);
     stream_component_open(is, stream_index);
+    snprintf(info, sizeof(info), "%s: #%d", av_get_media_type_string(codec_type), stream_index);
+    show_info = 1;
+    info_last_shown = av_gettime_relative();
 }
 
 
@@ -4081,7 +4088,12 @@ static void stream_seek_increment(VideoState *s, double incr)
         pos += incr;
         stream_seek(s, pos, incr, 1);
     } else {
-        pos = get_master_clock(s);
+        if(is_cycle_stream){
+            pos = get_clock(&s->vidclk);
+            is_cycle_stream = 0;
+        }
+        else
+            pos = get_master_clock(s);
         if (isnan(pos))
             pos = (double)s->seek_pos / AV_TIME_BASE;
         pos += incr;
