@@ -105,7 +105,7 @@ void Widget::on_buttonSubtitle_clicked()
 
 void Widget::on_buttonPlay_clicked()
 {
-    playProcess = new PlayerProcess(ui->leMedia->text(), ui->leSubtitle->text());
+    playProcess = new PlayerProcess(ui->leMedia->text(), ui->leSubtitle->text(), ui->rbHwAccel->isChecked());
     playProcess->startPlay();
     connect(playProcess, SIGNAL(finished(int,QProcess::ExitStatus)), this, SLOT(playProcess_finished(int,QProcess::ExitStatus)));
     ui->buttonPlay->setEnabled(false);
@@ -141,13 +141,14 @@ void Widget::resetSize()
         qDebug() << screenWidth << ", " << factor;
         widget->resize((int)(widget->width()*factor),(int)(widget->height()*factor));
         widget = ui->labelMedia;
-        ui->labelMedia->setText(QString::number(screenWidth));
         widget->setGeometry((int)(widget->x()*factor),(int)(widget->y()*factor),(int)(widget->width()*factor),(int)(widget->height()*factor));
         widget = ui->labelSubtitle;
         widget->setGeometry((int)(widget->x()*factor),(int)(widget->y()*factor),(int)(widget->width()*factor),(int)(widget->height()*factor));
         widget = ui->leSubtitle;
         widget->setGeometry((int)(widget->x()*factor),(int)(widget->y()*factor),(int)(widget->width()*factor),(int)(widget->height()*factor));
         widget = ui->leMedia;
+        widget->setGeometry((int)(widget->x()*factor),(int)(widget->y()*factor),(int)(widget->width()*factor),(int)(widget->height()*factor));
+        widget = ui->rbHwAccel;
         widget->setGeometry((int)(widget->x()*factor),(int)(widget->y()*factor),(int)(widget->width()*factor),(int)(widget->height()*factor));
         widget = ui->buttonMedia;
         widget->setGeometry((int)(widget->x()*factor),(int)(widget->y()*factor),(int)(widget->width()*factor),(int)(widget->height()*factor));

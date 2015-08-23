@@ -6,7 +6,7 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>515</width>
+    <width>528</width>
     <height>165</height>
    </rect>
   </property>
@@ -21,8 +21,8 @@
    <property name="geometry">
     <rect>
      <x>420</x>
-     <y>86</y>
-     <width>75</width>
+     <y>90</y>
+     <width>90</width>
      <height>28</height>
     </rect>
    </property>
@@ -136,6 +136,25 @@
     <string>Browse...</string>
    </property>
   </widget>
+  <widget class="QRadioButton" name="rbHwAccel">
+   <property name="geometry">
+    <rect>
+     <x>420</x>
+     <y>56</y>
+     <width>90</width>
+     <height>16</height>
+    </rect>
+   </property>
+   <property name="font">
+    <font>
+     <family>Courier New</family>
+     <pointsize>12</pointsize>
+    </font>
+   </property>
+   <property name="text">
+    <string>HwAccel</string>
+   </property>
+  </widget>
   <zorder>leMedia</zorder>
   <zorder>buttonPlay</zorder>
   <zorder>buttonSubtitle</zorder>
@@ -143,6 +162,7 @@
   <zorder>leSubtitle</zorder>
   <zorder>labelMedia</zorder>
   <zorder>buttonMedia</zorder>
+  <zorder>rbHwAccel</zorder>
  </widget>
  <layoutdefault spacing="6" margin="11"/>
  <customwidgets>

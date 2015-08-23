@@ -5,7 +5,7 @@
 #include <QTextStream>
 #include <QMessageBox>
 
-PlayerProcess::PlayerProcess(QString mediaPath, QString subtitlePath):QProcess(),
+PlayerProcess::PlayerProcess(QString mediaPath, QString subtitlePath, bool hwAccel):QProcess(),
     player("player.exe")
 {
     QString pos = getLastPosition(mediaPath);
@@ -13,6 +13,9 @@ PlayerProcess::PlayerProcess(QString mediaPath, QString subtitlePath):QProcess()
         arguments << "-ss" << pos;
     }
     arguments << "-autoexit";
+    if(hwAccel)
+        arguments << "-hwaccel";
+
     arguments << "-workdir" << QApplication::applicationDirPath();
     QString suffix = QFileInfo(mediaPath).suffix();
     QString audioTypes[8] = {"mp3","wma","wav","m4a","amr","ogg","aac","ape"};

@@ -6,7 +6,7 @@
 class PlayerProcess : public QProcess
 {
 public:
-    PlayerProcess(QString mediaPath, QString subtitlePath);
+    PlayerProcess(QString mediaPath, QString subtitlePath, bool hwAccel = false);
     ~PlayerProcess();
     void startPlay();
 private:

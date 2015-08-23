@@ -24,28 +24,12 @@
  */
 
 #include "config.h"
+#include "ffplay.h"
 #include <inttypes.h>
 #include <math.h>
 #include <limits.h>
 #include <signal.h>
 #include <stdint.h>
-
-#include "libavutil/avstring.h"
-#include "libavutil/colorspace.h"
-#include "libavutil/mathematics.h"
-#include "libavutil/pixdesc.h"
-#include "libavutil/imgutils.h"
-#include "libavutil/dict.h"
-#include "libavutil/parseutils.h"
-#include "libavutil/samplefmt.h"
-#include "libavutil/avassert.h"
-#include "libavutil/time.h"
-#include "libavformat/avformat.h"
-#include "libavdevice/avdevice.h"
-#include "libswscale/swscale.h"
-#include "libavutil/opt.h"
-#include "libavcodec/avfft.h"
-#include "libswresample/swresample.h"
 
 #if CONFIG_AVFILTER
 # include "libavfilter/avcodec.h"
@@ -297,6 +281,8 @@ typedef struct VideoState {
     PacketQueue subtitleq;
     SDL_Overlay *audio_bmp;
 
+    HwAccelContext *hac;
+
     double frame_timer;
     double frame_last_returned_time;
     double frame_last_filter_delay;
@@ -389,6 +375,7 @@ static int nb_vfilters = 0;
 static char *afilters = NULL;
 #endif
 static int autorotate = 1;
+static int hwaccel = 0;
 
 /* current context */
 static int is_full_screen;
@@ -626,6 +613,15 @@ static int decoder_decode_frame(VideoState *is, Decoder *d, AVFrame *frame, AVSu
             case AVMEDIA_TYPE_VIDEO:
                 ret = avcodec_decode_video2(d->avctx, frame, &got_frame, &d->pkt_temp);
                 if (got_frame) {
+                    if(hwaccel){
+                        HwAccelContext *hac = d->avctx->opaque;
+                        if (hac->hwaccel_retrieve_data && frame->format == hac->hwaccel_pix_fmt) {
+                            ret = hac->hwaccel_retrieve_data(d->avctx, frame);
+                            if (ret < 0)
+                                av_log(NULL, AV_LOG_ERROR, "hwaccel_retrieve_data failed\n");
+                        }
+                        hac->hwaccel_retrieved_pix_fmt = frame->format;
+                    }
                     if (decoder_reorder_pts == -1) {
                         frame->pts = av_frame_get_best_effort_timestamp(frame);
                     } else if (decoder_reorder_pts) {
@@ -1588,7 +1584,7 @@ static void do_exit(VideoState *is)
     TTF_CloseFont(font);
     TTF_Quit();
     SDL_Quit();
-    av_log(NULL, AV_LOG_QUIET, "%s", "");
+    av_log(NULL, AV_LOG_QUIET, "%s", "exit\n");
     exit(0);
 }
 
@@ -3324,6 +3320,44 @@ static int audio_open(void *opaque, int64_t wanted_channel_layout, int wanted_nb
     return spec.size;
 }
 
+static enum AVPixelFormat get_format(AVCodecContext *s, const enum AVPixelFormat *pix_fmts)
+{
+    HwAccelContext *hac = s->opaque;
+    const enum AVPixelFormat *p;
+    int ret = 0;
+
+    for (p = pix_fmts; *p != -1; p++) {
+        const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(*p);
+        av_log(NULL, AV_LOG_DEBUG, "get_format, %s\n", desc->name);
+
+        if (!(desc->flags & AV_PIX_FMT_FLAG_HWACCEL))
+            break;
+        if(hac->hwaccel_pix_fmt != *p){
+            if (hac->hwaccel_uninit)
+                hac->hwaccel_uninit(s);
+            ret = dxva2_init(s);
+            if (ret < 0) {
+                av_log(NULL, AV_LOG_ERROR, "dxva2_init failed\n");
+                exit(-1);
+            }
+            hac->hwaccel_pix_fmt = *p;
+        }
+        break;
+    }
+
+    return *p;
+}
+
+static int get_buffer(AVCodecContext *s, AVFrame *frame, int flags)
+{
+    HwAccelContext *hac = s->opaque;
+    if (hac->hwaccel_get_buffer && frame->format == hac->hwaccel_pix_fmt)
+        return hac->hwaccel_get_buffer(s, frame, flags);
+
+    return avcodec_default_get_buffer2(s, frame, flags);
+}
+
+
 /* open a given stream. Return 0 if OK */
 static int stream_component_open(VideoState *is, int stream_index)
 {
@@ -3341,9 +3375,7 @@ static int stream_component_open(VideoState *is, int stream_index)
     if (stream_index < 0 || stream_index >= ic->nb_streams)
         return -1;
     avctx = ic->streams[stream_index]->codec;
-
     codec = avcodec_find_decoder(avctx->codec_id);
-
     switch(avctx->codec_type){
         case AVMEDIA_TYPE_AUDIO   : is->last_audio_stream    = stream_index; forced_codec_name =    audio_codec_name; break;
         case AVMEDIA_TYPE_SUBTITLE: is->last_subtitle_stream = stream_index; forced_codec_name = subtitle_codec_name; break;
@@ -3371,7 +3403,14 @@ static int stream_component_open(VideoState *is, int stream_index)
     if (fast)   avctx->flags2 |= CODEC_FLAG2_FAST;
     if(codec->capabilities & CODEC_CAP_DR1)
         avctx->flags |= CODEC_FLAG_EMU_EDGE;
-
+    
+    if(hwaccel && avctx->codec_type == AVMEDIA_TYPE_VIDEO){
+        is->hac = av_mallocz(sizeof(HwAccelContext));
+        avctx->opaque = is->hac;
+        avctx->get_format = get_format;
+        avctx->get_buffer2 = get_buffer;
+    }
+    
     opts = filter_codec_opts(codec_opts, avctx->codec_id, ic, ic->streams[stream_index], codec);
     if (!av_dict_get(opts, "threads", NULL, 0))
         av_dict_set(&opts, "threads", "auto", 0);
@@ -3379,6 +3418,7 @@ static int stream_component_open(VideoState *is, int stream_index)
         av_dict_set_int(&opts, "lowres", stream_lowres, 0);
     if (avctx->codec_type == AVMEDIA_TYPE_VIDEO || avctx->codec_type == AVMEDIA_TYPE_AUDIO)
         av_dict_set(&opts, "refcounted_frames", "1", 0);
+    
     if ((ret = avcodec_open2(avctx, codec, &opts)) < 0) {
         goto fail;
     }
@@ -3486,6 +3526,11 @@ static void stream_component_close(VideoState *is, int stream_index)
     case AVMEDIA_TYPE_VIDEO:
         decoder_abort(&is->viddec, &is->pictq);
         decoder_destroy(&is->viddec);
+        if(hwaccel && is->hac){
+            if (is->hac->hwaccel_uninit)
+                is->hac->hwaccel_uninit(avctx);
+            av_free(is->hac);
+        }
         break;
     case AVMEDIA_TYPE_SUBTITLE:
         decoder_abort(&is->subdec, &is->subpq);
@@ -4591,6 +4636,7 @@ static const OptionDef options[] = {
     { "sub", OPT_STRING | HAS_ARG, { &subtitle_filename }, "set external subtitle", "external subtitle" },
     { "force_style", OPT_STRING | HAS_ARG, { &force_style }, "set external subtitle force style", "external subtitle force style" },
     { "workdir", OPT_STRING | HAS_ARG, { &working_dir }, "set working directory", "working directory" },
+    { "hwaccel", OPT_BOOL, { &hwaccel}, "GPU hardware acceleration", ""},
     { NULL, },
 };
 
