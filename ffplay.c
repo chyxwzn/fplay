@@ -4299,7 +4299,17 @@ static void event_loop(VideoState *cur_stream)
             case SDLK_7:
             case SDLK_8:
             case SDLK_9:
-                if(sc){
+                if(event.key.keysym.mod & KMOD_ALT){
+                    float speed_percent = (event.key.keysym.sym - SDLK_0) / 10.0;
+                    float speed_incr;
+                    if (speed_percent == 0.0)
+                        speed_percent = 1.0;
+                    speed_incr = speed_percent - play_speed;
+                    setPlaySpeedIncrement(cur_stream->agraph, speed_incr);
+                    snprintf(info, sizeof(info), "speed:%d%%", (int)(play_speed * 100 + 0.1));
+                    goto do_show_info;
+                }
+                else if(sc){
                     repeat_times = event.key.keysym.sym - SDLK_0;
                     if(repeat_times > 0 && stream_seek_by_sub(cur_stream, REPEAT_CURRENT) < 0)
                         repeat_times = 0;
