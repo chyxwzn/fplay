@@ -10,11 +10,22 @@ int main(int argc, char *argv[])
     if(argc > 1){
         QTextCodec *codec = QTextCodec::codecForLocale();
         QString mediaPath = codec->toUnicode(argv[1]);
-        playProcess = new PlayerProcess(mediaPath, NULL);
+        QString path = QFileInfo(mediaPath).absoluteFilePath();
+        QString basePath = path.left(path.indexOf(QFileInfo(mediaPath).suffix()));
+        QString suffixes[3] = {"srt", "ass", "lrc"};
+        QString subPath = NULL;
+        for(int i = 0; i < 3; i++){
+            if(QFileInfo(basePath + suffixes[i]).exists()){
+                subPath = basePath + suffixes[i];
+                break;
+            }
+        }
+        playProcess = new PlayerProcess(mediaPath, subPath);
         playProcess->startPlay();
     }
-    Widget w(playProcess);
-    if(playProcess == NULL)
+    if(playProcess == NULL){
+        Widget w(playProcess);
         w.show();
+    }
     return a.exec();
 }

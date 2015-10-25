@@ -4329,38 +4329,38 @@ static void event_loop(VideoState *cur_stream)
                 break;
             case SDLK_LEFT:
                 repeat_times = 0;
-                if(sc){
-                    if(!cur_stream->stream_seeking){
+                if(!cur_stream->stream_seeking){
+                    if(sc){
                         incr = stream_seek_by_sub(cur_stream, SEEK_PREVIOUS);
                         if(incr != 0){
                             snprintf(info, sizeof(info), "backward: %.1fs", -incr);
                             goto do_show_info;
                         }
                     }
-                }
-                else{
-                    incr = -5.0;
-                    stream_seek_increment(cur_stream, incr);
-                    snprintf(info, sizeof(info), "backward: %ds", (int)-incr);
-                    goto do_show_info;
+                    else{
+                        incr = -5.0;
+                        stream_seek_increment(cur_stream, incr);
+                        snprintf(info, sizeof(info), "backward: %ds", (int)-incr);
+                        goto do_show_info;
+                    }
                 }
                 break;
             case SDLK_RIGHT:
                 repeat_times = 0;
-                if(sc){
-                    if(!cur_stream->stream_seeking){
+                if(!cur_stream->stream_seeking){
+                    if(sc){
                         incr = stream_seek_by_sub(cur_stream, SEEK_NEXT);
                         if(incr != 0){
                             snprintf(info, sizeof(info), "forward: %.1fs", incr);
                             goto do_show_info;
                         }
                     }
-                }
-                else{
-                    incr = 5.0;
-                    stream_seek_increment(cur_stream, incr);
-                    snprintf(info, sizeof(info), "forward: %ds", (int)incr);
-                    goto do_show_info;
+                    else{
+                        incr = 5.0;
+                        stream_seek_increment(cur_stream, incr);
+                        snprintf(info, sizeof(info), "forward: %ds", (int)incr);
+                        goto do_show_info;
+                    }
                 }
                 break;
             case SDLK_UP:
