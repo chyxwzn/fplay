@@ -23,9 +23,8 @@ int main(int argc, char *argv[])
         playProcess = new PlayerProcess(mediaPath, subPath);
         playProcess->startPlay();
     }
-    if(playProcess == NULL){
-        Widget w(playProcess);
+    Widget w(playProcess);
+    if(playProcess == NULL)
         w.show();
-    }
     return a.exec();
 }
