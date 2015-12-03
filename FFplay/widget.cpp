@@ -134,7 +134,8 @@ void Widget::trayIcon_activited(QSystemTrayIcon::ActivationReason reason)
 void Widget::resetSize()
 {
     int screenWidth = QApplication::desktop()->width();
-    if (screenWidth > 1920){
+    int screenHeight = QApplication::desktop()->height();
+    if (screenWidth > 1920 && screenHeight > 1080){
         double factor = 2;
         QWidget *widget;
         widget = this;
